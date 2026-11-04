@@ -1,175 +1,61 @@
-from datetime import datetime, timezone
+"""Candidate-side application history."""
+from typing import Optional
 
-from bson import ObjectId
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    status
-)
+from app.database import applications_collection, jobs_collection
+from app.dependencies.auth import require_roles
+from app.services.applications import shape_applications
+from app.utils import get_or_404, now, oid
 
-from app.database import (
-    applications_collection,
-    jobs_collection,
-    resumes_collection
-)
+router = APIRouter()
 
-from app.dependencies.auth import get_current_user
-
-from app.schemas.applications import ApplicationCreate
-
-
-router = APIRouter(
-    tags=["Applications"]
-)
-
-
-# --------------------------------
-# APPLY FOR JOB
-# --------------------------------
-
-@router.post(
-    "/jobs/{job_id}/apply",
-    status_code=status.HTTP_201_CREATED
-)
-def apply_for_job(
-    job_id: str,
-    data: ApplicationCreate,
-    current_user=Depends(get_current_user)
-):
-
-    if not ObjectId.is_valid(job_id):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid job ID"
-        )
-
-    if not ObjectId.is_valid(data.resume_id):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid resume ID"
-        )
-
-    job = jobs_collection.find_one({
-        "_id": ObjectId(job_id),
-        "is_active": True
-    })
-
-    if not job:
-        raise HTTPException(
-            status_code=404,
-            detail="Job not found"
-        )
-
-    resume = resumes_collection.find_one({
-        "_id": ObjectId(data.resume_id),
-        "user_id": current_user["_id"]
-    })
-
-    if not resume:
-        raise HTTPException(
-            status_code=404,
-            detail="Resume not found"
-        )
-
-    existing_application = applications_collection.find_one({
-        "job_id": ObjectId(job_id),
-        "user_id": current_user["_id"]
-    })
-
-    if existing_application:
-        raise HTTPException(
-            status_code=409,
-            detail="You have already applied for this job"
-        )
-
-    application = {
-        "job_id": ObjectId(job_id),
-        "user_id": current_user["_id"],
-        "resume_id": ObjectId(data.resume_id),
-        "cover_letter": data.cover_letter,
-        "status": "applied",
-        "applied_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc)
-    }
-
-    result = applications_collection.insert_one(application)
-
-    return {
-        "message": "Application submitted successfully",
-        "application_id": str(result.inserted_id)
-    }
-
-
-# --------------------------------
-# GET MY APPLICATIONS
-# --------------------------------
 
 @router.get("")
-def get_my_applications(
-    current_user=Depends(get_current_user)
+def my_applications(
+    status: Optional[str] = Query(default=None, pattern="^(applied|shortlisted|rejected|accepted|withdrawn)$"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    user=Depends(require_roles("user")),
 ):
-
-    applications = list(
-        applications_collection.find({
-            "user_id": current_user["_id"]
-        }).sort(
-            "applied_at",
-            -1
-        )
+    query: dict = {"user_id": user["_id"]}
+    if status:
+        query["status"] = status
+    total = applications_collection.count_documents(query)
+    docs = list(
+        applications_collection.find(query).sort("applied_at", -1).skip((page - 1) * limit).limit(limit)
     )
+    return {
+        "items": shape_applications(docs, "user"),
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": max(1, -(-total // limit)),
+    }
 
-    result = []
-
-    for application in applications:
-
-        result.append({
-            "id": str(application["_id"]),
-            "job_id": str(application["job_id"]),
-            "resume_id": str(application["resume_id"]),
-            "status": application["status"],
-            "cover_letter": application.get("cover_letter"),
-            "applied_at": application["applied_at"],
-            "updated_at": application["updated_at"]
-        })
-
-    return result
-
-
-# --------------------------------
-# GET SINGLE APPLICATION
-# --------------------------------
 
 @router.get("/{application_id}")
-def get_application(
-    application_id: str,
-    current_user=Depends(get_current_user)
-):
+def get_application(application_id: str, user=Depends(require_roles("user"))):
+    app = get_or_404(
+        applications_collection, oid(application_id, "application ID"), "Application", {"user_id": user["_id"]}
+    )
+    return shape_applications([app], "user")[0]
 
-    if not ObjectId.is_valid(application_id):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid application ID"
-        )
 
-    application = applications_collection.find_one({
-        "_id": ObjectId(application_id),
-        "user_id": current_user["_id"]
-    })
-
-    if not application:
-        raise HTTPException(
-            status_code=404,
-            detail="Application not found"
-        )
-
-    return {
-        "id": str(application["_id"]),
-        "job_id": str(application["job_id"]),
-        "resume_id": str(application["resume_id"]),
-        "status": application["status"],
-        "cover_letter": application.get("cover_letter"),
-        "applied_at": application["applied_at"],
-        "updated_at": application["updated_at"]
-    }
+@router.post("/{application_id}/withdraw")
+def withdraw(application_id: str, user=Depends(require_roles("user"))):
+    app = get_or_404(
+        applications_collection, oid(application_id, "application ID"), "Application", {"user_id": user["_id"]}
+    )
+    if app["status"] in ("accepted", "rejected", "withdrawn"):
+        raise HTTPException(400, f"Cannot withdraw an application that is {app['status']}")
+    ts = now()
+    applications_collection.update_one(
+        {"_id": app["_id"]},
+        {
+            "$set": {"status": "withdrawn", "updated_at": ts},
+            "$push": {"status_history": {"status": "withdrawn", "at": ts, "note": "Withdrawn by candidate"}},
+        },
+    )
+    jobs_collection.update_one({"_id": app["job_id"], "applications_count": {"$gt": 0}}, {"$inc": {"applications_count": -1}})
+    return {"message": "Application withdrawn", "status": "withdrawn"}

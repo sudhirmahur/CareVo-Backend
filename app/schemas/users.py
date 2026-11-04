@@ -1,69 +1,68 @@
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
+from app.schemas.common import Email, HttpUrl, MediaUrl, Password
 
-# --------------------------------
-# USER REGISTER
-# --------------------------------
 
 class UserRegister(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    email: Email
+    password: Password
+    phone: Optional[str] = Field(default=None, max_length=20)
+    # Admins can never be self-registered.
+    role: Literal["user", "recruiter"] = "user"
 
-    name: str = Field(
-        min_length=2,
-        max_length=100
-    )
-
-    email: EmailStr
-
-    password: str = Field(
-        min_length=6,
-        max_length=100
-    )
-
-
-# --------------------------------
-# USER LOGIN
-# --------------------------------
 
 class UserLogin(BaseModel):
-
-    email: EmailStr
-
-    password: str
+    email: Email
+    password: str = Field(min_length=1, max_length=100)
 
 
-# --------------------------------
-# USER UPDATE
-# --------------------------------
+class ForgotPassword(BaseModel):
+    email: Email
+
+
+class ResetPassword(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+    password: Password
+
+
+class ChangePassword(BaseModel):
+    current_password: str = Field(min_length=1, max_length=100)
+    new_password: Password
+
 
 class UserUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    profile_image: MediaUrl = None
 
-    name: Optional[str] = Field(
-        default=None,
-        min_length=2,
-        max_length=100
-    )
-
-    phone: Optional[str] = None
-
-
-# --------------------------------
-# PROFILE UPDATE
-# --------------------------------
 
 class ProfileUpdate(BaseModel):
+    bio: Optional[str] = Field(default=None, max_length=2000)
+    experience_years: Optional[int] = Field(default=None, ge=0, le=60)
+    current_position: Optional[str] = Field(default=None, max_length=120)
+    location: Optional[str] = Field(default=None, max_length=120)
+    github_url: HttpUrl = None
+    linkedin_url: HttpUrl = None
+    portfolio_url: HttpUrl = None
+    skills: Optional[list[str]] = None
 
-    bio: Optional[str] = None
 
-    experience_years: Optional[int] = None
+class AdminUserCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    email: Email
+    password: Password
+    role: Literal["user", "recruiter", "admin"] = "user"
 
-    current_position: Optional[str] = None
 
-    location: Optional[str] = None
+class AdminUserUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+    role: Optional[Literal["user", "recruiter", "admin"]] = None
+    is_active: Optional[bool] = None
 
-    github_url: Optional[str] = None
 
-    linkedin_url: Optional[str] = None
-
-    portfolio_url: Optional[str] = None
+class GoogleLogin(BaseModel):
+    access_token: str = Field(min_length=10, max_length=4096)
+    role: Literal["user", "recruiter"] = "user"
