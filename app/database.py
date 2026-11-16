@@ -48,6 +48,36 @@ assessments_collection = db["assessments"]
 assessment_results_collection = db["assessment_results"]
 resume_builds_collection = db["resume_builds"]
 audit_logs_collection = db["audit_logs"]
+popups_collection = db["popups"]
+plans_collection = db["plans"]
+payments_collection = db["payments"]
+subscriptions_collection = db["subscriptions"]
+sessions_collection = db["sessions"]
+activity_collection = db["activity"]
+challenges_collection = db["auth_challenges"]
+email_templates_collection = db["email_templates"]
+email_outbox_collection = db["email_outbox"]
+tickets_collection = db["tickets"]
+counters_collection = db["counters"]
+feedback_collection = db["feedback"]
+blocks_collection = db["blocks"]
+deletion_requests_collection = db["deletion_requests"]
+admin_roles_collection = db["admin_roles"]
+backups_collection = db["backups"]
+health_checks_collection = db["health_checks"]
+system_errors_collection = db["system_errors"]
+events_collection = db["events"]
+event_registrations_collection = db["event_registrations"]
+documents_collection = db["documents"]
+referrals_collection = db["referrals"]
+referral_invites_collection = db["referral_invites"]
+offers_collection = db["offers"]
+offer_templates_collection = db["offer_templates"]
+evaluations_collection = db["evaluations"]
+calendar_events_collection = db["calendar_events"]
+team_members_collection = db["team_members"]
+candidate_pool_collection = db["candidate_pool"]
+job_views_collection = db["job_views"]
 
 
 def ensure_indexes() -> None:
@@ -80,6 +110,27 @@ def ensure_indexes() -> None:
         (assessment_results_collection, [("user_id", ASCENDING), ("assessment_id", ASCENDING)], {}),
         (resume_builds_collection, "user_id", {"unique": True}),
         (audit_logs_collection, [("created_at", DESCENDING)], {}),
+        (payments_collection, "order_id", {"unique": True}),
+        (admin_roles_collection, "key", {"unique": True}),
+        (event_registrations_collection, [("event_id", ASCENDING), ("user_id", ASCENDING)], {"unique": True}),
+        (documents_collection, [("user_id", ASCENDING), ("created_at", DESCENDING)], {}),
+        (referrals_collection, "referred_id", {"unique": True}),
+        (referrals_collection, "referrer_id", {}),
+        (offers_collection, [("candidate_id", ASCENDING), ("created_at", DESCENDING)], {}),
+        (offers_collection, "application_id", {}),
+        (evaluations_collection, [("application_id", ASCENDING), ("created_at", DESCENDING)], {}),
+        (calendar_events_collection, [("recruiter_id", ASCENDING), ("starts_at", ASCENDING)], {}),
+        (team_members_collection, [("company_id", ASCENDING), ("email", ASCENDING)], {"unique": True}),
+        (job_views_collection, [("job_id", ASCENDING), ("at", DESCENDING)], {}),
+        (candidate_pool_collection, [("recruiter_id", ASCENDING), ("email", ASCENDING)], {"unique": True}),
+        (sessions_collection, [("user_id", ASCENDING), ("created_at", DESCENDING)], {}),
+        (activity_collection, [("user_id", ASCENDING), ("created_at", DESCENDING)], {}),
+        (email_templates_collection, "key", {"unique": True}),
+        (tickets_collection, "ticket_no", {"unique": True}),
+        (tickets_collection, [("user_id", ASCENDING), ("updated_at", DESCENDING)], {}),
+        (blocks_collection, [("blocker_id", ASCENDING), ("blocked_id", ASCENDING)], {"unique": True}),
+        (payments_collection, [("user_id", ASCENDING), ("created_at", DESCENDING)], {}),
+        (subscriptions_collection, [("user_id", ASCENDING), ("ends_at", DESCENDING)], {}),
     ]
     for collection, keys, opts in specs:
         try:

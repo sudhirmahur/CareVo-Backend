@@ -8,6 +8,7 @@ from app.database import (
     companies_collection,
     followers_collection,
     jobs_collection,
+    messages_collection,
     reports_collection,
     users_collection,
     videos_collection,
@@ -115,7 +116,7 @@ def my_following(user=Depends(get_current_user)):
 @router.post("/reports", status_code=201)
 def create_report(data: ReportIn, user=Depends(get_current_user)):
     cid = oid(data.content_id, "content ID")
-    target = {"job": jobs_collection, "user": users_collection, "video": videos_collection, "comment": video_comments_collection}[data.content_type]
+    target = {"job": jobs_collection, "user": users_collection, "video": videos_collection, "comment": video_comments_collection, "message": messages_collection}[data.content_type]
     get_or_404(target, cid, "Reported content")
     dup = reports_collection.find_one({"reporter_id": user["_id"], "content_type": data.content_type, "content_id": cid, "status": "pending"})
     if dup:
@@ -137,12 +138,14 @@ def create_report(data: ReportIn, user=Depends(get_current_user)):
     return {"message": "Thanks - our team will review this report", "report_id": str(res.inserted_id)}
 
 
+@router.get("/reports/mine")
+def my_reports(user=Depends(get_current_user)):
+    rows = reports_collection.find({"reporter_id": user["_id"]}).sort("created_at", -1).limit(50)
+    return {"items": [{"id": str(r["_id"]), "content_type": r["content_type"], "reason": r["reason"], "status": r["status"], "resolution": r.get("resolution"), "created_at": ser(r["created_at"])} for r in rows]}
+
+
 # ------------------------------------------------- banners + stats
 
-
-@router.get("/banners")
-def public_banners():
-    return [ser(b) for b in banners_collection.find({"is_active": True}).sort("created_at", -1).limit(10)]
 
 
 @router.get("/public/stats")

@@ -62,3 +62,9 @@ def run_startup_seed() -> None:
     seed_taxonomy()
     seed_admin()
     seed_learning()
+    from app.services.email import seed_templates
+
+    seed_templates()
+    from app.services.permissions import seed_roles
+
+    seed_roles()

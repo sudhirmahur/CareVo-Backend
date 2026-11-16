@@ -50,13 +50,15 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: str, role: str) -> str:
+def create_access_token(user_id: str, role: str, sid: str | None = None) -> str:
     payload = {
         "sub": user_id,
         "role": role,
         "iat": now(),
         "exp": now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     }
+    if sid:
+        payload["sid"] = sid
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 

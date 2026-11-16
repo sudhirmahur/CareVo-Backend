@@ -1,7 +1,7 @@
 import secrets
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 import json
 import urllib.error
@@ -32,7 +32,10 @@ from app.schemas.users import (
     UserLogin,
     UserRegister,
 )
-from app.services.auth import create_access_token, hash_password, hash_token, verify_password
+from app.services.auth import hash_password, hash_token, verify_password
+from app.services.email import send_template
+from app.services.sessions import issue_token, log_activity, revoke_all
+from app.services.twofa import login_result
 from app.services.notify import notify
 from app.services.premium import is_premium
 from app.services.settings import get_settings
@@ -58,7 +61,7 @@ def public_user(user: dict) -> dict:
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(data: UserRegister):
+def register(data: UserRegister, request: Request):
     if not get_settings()["allow_registration"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "New registrations are currently disabled")
     if users_collection.find_one({"email": data.email}):
@@ -76,7 +79,12 @@ def register(data: UserRegister):
     doc["_id"] = user_id
 
     # Sign the user in right away so the client can go straight to the dashboard.
-    token = create_access_token(str(user_id), doc["role"])
+    if data.role == "user":
+        from app.routes.career import register_referral
+
+        register_referral(doc, data.referral_code)
+    token = issue_token(doc, request, "register")
+    send_template("welcome", doc["email"], {"name": doc["name"]}, user_id)
     return {
         "message": "Registration successful",
         "user_id": str(user_id),
@@ -91,7 +99,7 @@ def _aware(dt):
 
 
 @router.post("/login")
-def login(data: UserLogin):
+def login(data: UserLogin, request: Request):
     user = users_collection.find_one({"email": data.email})
     if user:
         locked = _aware(user.get("locked_until"))
@@ -106,19 +114,17 @@ def login(data: UserLogin):
                 update = {"failed_logins": 0, "locked_until": now() + timedelta(minutes=LOCKOUT_MINUTES)}
             users_collection.update_one({"_id": user["_id"]}, {"$set": update})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if not user.get("is_active", False) and user.get("self_deactivated"):
+        users_collection.update_one({"_id": user["_id"]}, {"$set": {"is_active": True, "self_deactivated": False}, "$unset": {"deactivated_at": ""}})
+        user["is_active"] = True
+        log_activity(user["_id"], "reactivated", request)
     if not user.get("is_active", False):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is blocked or inactive")
     if get_settings()["maintenance_mode"] and user["role"] != "admin":
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Platform is under maintenance. Try again later.")
     if user.get("failed_logins") or user.get("locked_until"):
         users_collection.update_one({"_id": user["_id"]}, {"$set": {"failed_logins": 0, "locked_until": None}})
-    token = create_access_token(str(user["_id"]), user["role"])
-    return {
-        "message": "Login successful",
-        "access_token": token,
-        "token_type": "bearer",
-        "user": public_user(user),
-    }
+    return login_result(user, request, public_user)
 
 
 def _google_profile(access_token: str) -> dict:
@@ -137,7 +143,7 @@ def _google_profile(access_token: str) -> dict:
 
 
 @router.post("/google")
-def google_login(data: GoogleLogin):
+def google_login(data: GoogleLogin, request: Request):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Google sign-in is not configured on this server")
     info = _google_profile(data.access_token)
@@ -159,8 +165,7 @@ def google_login(data: GoogleLogin):
         user = doc
     elif not user.get("provider_id") and info.get("sub"):
         users_collection.update_one({"_id": user["_id"]}, {"$set": {"provider_id": info["sub"]}})
-    token = create_access_token(str(user["_id"]), user["role"])
-    return {"message": "Login successful", "access_token": token, "token_type": "bearer", "user": public_user(user)}
+    return login_result(user, request, public_user)
 
 
 @router.get("/me")
@@ -185,6 +190,9 @@ def forgot_password(data: ForgotPassword):
             "created_at": now(),
         }
     )
+    from app.config import PUBLIC_APP_URL
+
+    send_template("password_reset", user["email"], {"name": user["name"], "link": f"{PUBLIC_APP_URL}/reset-password?token={token}"}, user["_id"])
     if EXPOSE_RESET_TOKEN:  # development convenience only
         response["reset_token"] = token
     return response
@@ -205,11 +213,12 @@ def reset_password(data: ResetPassword):
         {"$set": {"password_hash": hash_password(data.password), "updated_at": now(), "tokens_valid_after": now(), "failed_logins": 0, "locked_until": None}},
     )
     password_resets_collection.update_one({"_id": record["_id"]}, {"$set": {"used": True}})
+    revoke_all(record["user_id"])
     return {"message": "Password has been reset. You can sign in now."}
 
 
 @router.post("/change-password")
-def change_password(data: ChangePassword, user=Depends(get_current_user)):
+def change_password(data: ChangePassword, request: Request, user=Depends(get_current_user)):
     if not verify_password(data.current_password, user.get("password_hash", "")):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
     users_collection.update_one(
@@ -218,4 +227,6 @@ def change_password(data: ChangePassword, user=Depends(get_current_user)):
     )
     notify(user["_id"], "Password changed", "Your password was changed successfully.", "system")
     # every older session (stolen tokens included) is now invalid; give this browser a fresh one
-    return {"message": "Password updated", "access_token": create_access_token(str(user["_id"]), user["role"]), "token_type": "bearer"}
+    revoke_all(user["_id"])
+    log_activity(user["_id"], "password_changed", request)
+    return {"message": "Password updated", "access_token": issue_token(user, request, "login"), "token_type": "bearer"}

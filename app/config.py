@@ -16,6 +16,8 @@ def _bool(name: str, default: bool = False) -> bool:
 # "mongomock://" runs a throw-away in-memory database (tests / quick local demo).
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "carevo")
+ENV = os.getenv("ENV", "development").strip().lower()  # set ENV=production when deployed
+IS_PRODUCTION = ENV == "production"
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
@@ -65,9 +67,26 @@ CLOUDINARY_FOLDER = os.getenv("CLOUDINARY_FOLDER", "carevo").strip("/")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_TOKENINFO_URL = os.getenv("GOOGLE_TOKENINFO_URL", "https://oauth2.googleapis.com/tokeninfo")
 
+# ---- Razorpay (payments). Keys come from the Razorpay dashboard; use rzp_test_* keys while testing.
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip()
+RAZORPAY_API_BASE = os.getenv("RAZORPAY_API_BASE", "https://api.razorpay.com/v1").rstrip("/")
+
+# ---- E-mail (optional). Without SMTP_HOST every e-mail is only recorded in the outbox (Admin > Emails).
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "CareVo <no-reply@carevo.local>").strip()
+SMTP_TLS = _bool("SMTP_TLS", True)
+SCHEDULER_ENABLED = _bool("SCHEDULER_ENABLED", True)  # background digests / reminders / scheduled backups
+# Dev/test only: return one-time codes in the API response (there is no mail provider in the sandbox).
+EXPOSE_OTP = _bool("EXPOSE_OTP", False)
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173").rstrip("/")
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", str(BASE_DIR / "backups")))
+
 # ---- Security
-ENV = os.getenv("ENV", "development").strip().lower()  # set ENV=production when deployed
-IS_PRODUCTION = ENV == "production"
 RATE_LIMIT_ENABLED = _bool("RATE_LIMIT_ENABLED", True)
 TRUST_PROXY = _bool("TRUST_PROXY", False)  # honour X-Forwarded-For (only behind your own proxy / load balancer)
 MAX_FAILED_LOGINS = int(os.getenv("MAX_FAILED_LOGINS", "5"))
@@ -85,7 +104,7 @@ RESET_TOKEN_MINUTES = int(os.getenv("RESET_TOKEN_MINUTES", "30"))
 if IS_PRODUCTION:
     if len(JWT_SECRET) < 32:
         raise RuntimeError("JWT_SECRET must be at least 32 characters in production")
-    if EXPOSE_RESET_TOKEN:
-        raise RuntimeError("EXPOSE_RESET_TOKEN must be false in production")
+    if EXPOSE_RESET_TOKEN or EXPOSE_OTP:
+        raise RuntimeError("EXPOSE_RESET_TOKEN and EXPOSE_OTP must be false in production")
     if "*" in CORS_ORIGINS:
         raise RuntimeError("CORS_ORIGINS must list your real frontend origin(s) in production")

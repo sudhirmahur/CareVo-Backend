@@ -92,6 +92,17 @@ def shape_jobs(jobs: list, user: Optional[dict] = None, full: bool = False) -> l
     return out
 
 
+def normalise_questions(questions: list) -> list:
+    import secrets
+
+    out = []
+    for q in questions or []:
+        q = dict(q)
+        q["id"] = q.get("id") or secrets.token_hex(4)
+        out.append(q)
+    return out
+
+
 def build_job_document(data, company: dict, recruiter_id, status: str) -> dict:
     ts = now()
     return {
@@ -109,6 +120,8 @@ def build_job_document(data, company: dict, recruiter_id, status: str) -> dict:
         "apply_url": data.apply_url,
         "application_deadline": data.application_deadline,
         "is_active": data.is_active,
+        "work_mode": data.work_mode,
+        "screening_questions": normalise_questions([q.model_dump() for q in data.screening_questions]),
         "is_featured": False,
         "status": status,  # pending | approved | rejected
         "rejection_reason": None,
@@ -137,6 +150,8 @@ def apply_job_update(job: dict, data) -> dict:
         from fastapi import HTTPException
 
         raise HTTPException(422, "salary_max must be greater than or equal to salary_min")
+    if values.get("screening_questions") is not None:
+        values["screening_questions"] = normalise_questions(values["screening_questions"])
     values["updated_at"] = now()
     return values
 
@@ -148,3 +163,26 @@ def delete_job_cascade(job_id) -> None:
     job_skills_collection.delete_many({"job_id": job_id})
     saved_jobs_collection.delete_many({"job_id": job_id})
     jobs_collection.delete_one({"_id": job_id})
+
+
+def validate_answers(job: dict, given: dict) -> list:
+    """Check candidate answers against the job's screening questions; returns the snapshot stored on the application."""
+    from fastapi import HTTPException
+
+    out = []
+    for q in job.get("screening_questions") or []:
+        a = str((given or {}).get(q["id"], "")).strip()
+        if not a:
+            if q.get("required", True):
+                raise HTTPException(422, f"Please answer: {q['question']}")
+            continue
+        if len(a) > 1000:
+            raise HTTPException(422, f"Answer is too long: {q['question']}")
+        if q["type"] == "yesno" and a.lower() not in ("yes", "no"):
+            raise HTTPException(422, f"Answer Yes or No: {q['question']}")
+        if q["type"] == "choice" and a not in q.get("options", []):
+            raise HTTPException(422, f"Pick one of the options: {q['question']}")
+        if q["type"] == "yesno":
+            a = a.capitalize()
+        out.append({"question_id": q["id"], "question": q["question"], "type": q["type"], "kind": q.get("kind", "general"), "answer": a})
+    return out

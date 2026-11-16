@@ -19,6 +19,7 @@ PURPOSES = {
     "video": ({"video"}, {"recruiter", "admin"}),
     "thumbnail": ({"image"}, {"recruiter", "admin"}),
     "banner": ({"image"}, {"admin"}),
+    "popup": ({"image"}, {"admin"}),
     "landing": ({"image"}, {"admin"}),
 }
 UPLOADS_PER_HOUR = 60

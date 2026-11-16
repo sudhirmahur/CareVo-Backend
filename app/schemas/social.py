@@ -48,7 +48,7 @@ class MessageIn(BaseModel):
 
 
 class ReportIn(BaseModel):
-    content_type: Literal["job", "user", "video", "comment"]
+    content_type: Literal["job", "user", "video", "comment", "message"]
     content_id: str
     reason: str = Field(min_length=3, max_length=1000)
 

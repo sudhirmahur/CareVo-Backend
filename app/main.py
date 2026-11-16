@@ -6,14 +6,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import CORS_ORIGINS, IS_PRODUCTION, UPLOAD_DIR
+from app.config import CORS_ORIGINS, IS_PRODUCTION, SCHEDULER_ENABLED, UPLOAD_DIR
 from app.middleware import SecurityMiddleware
 from app.database import ensure_indexes
 from app.routes import (
     admin,
     admin_content,
+    admin_events,
     admin_learning,
+    admin_system,
+    announcements,
     applications,
+    admin_ops,
+    career,
+    hiring,
     auth,
     interviews,
     jobs,
@@ -21,12 +27,16 @@ from app.routes import (
     media,
     messages,
     notifications,
+    payments,
     public,
     recruiter,
     recruiters,
     resumes,
     skills,
     social,
+    support,
+    twofa,
+    account,
     users,
     videos,
 )
@@ -39,7 +49,16 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 async def lifespan(_: FastAPI):
     ensure_indexes()
     run_startup_seed()
+    task = None
+    if SCHEDULER_ENABLED:
+        import asyncio
+
+        from app.services import scheduler
+
+        task = asyncio.create_task(scheduler.loop())
     yield
+    if task:
+        task.cancel()
 
 
 app = FastAPI(
@@ -72,6 +91,12 @@ class PublicUploads(StaticFiles):
 app.mount("/uploads", PublicUploads(directory=str(UPLOAD_DIR)), name="uploads")
 
 
+@app.exception_handler(Exception)
+async def unhandled(request: Request, exc: Exception):
+    admin_ops.record_error(request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "Something went wrong on our side"})
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_handler(_: Request, exc: RequestValidationError):
     """Return a short, human-readable `detail` string (the UI shows it as-is)."""
@@ -99,6 +124,7 @@ app.include_router(notifications.router, prefix=f"{API}/notifications", tags=["N
 app.include_router(messages.router, prefix=f"{API}/messages", tags=["Messages"])
 app.include_router(videos.router, prefix=f"{API}/videos", tags=["Videos"])
 app.include_router(social.router, prefix=API, tags=["Companies / Follow / Reports"])
+app.include_router(hiring.router, prefix=f"{API}/recruiter", tags=["Hiring"])  # before recruiter: static paths win over /applications/{id}
 app.include_router(recruiter.router, prefix=f"{API}/recruiter", tags=["Recruiter"])
 app.include_router(admin.router, prefix=f"{API}/admin", tags=["Admin"])
 
@@ -116,5 +142,19 @@ app.include_router(public.router, prefix=f"{API}/public", tags=["Public"])
 app.include_router(recruiters.router, prefix=f"{API}/recruiters", tags=["Recruiters"])
 app.include_router(admin_content.router, prefix=f"{API}/admin", tags=["Admin - content"])
 app.include_router(learning.router, prefix=API, tags=["Learning"])
+app.include_router(payments.router, prefix=API, tags=["Payments"])
+app.include_router(twofa.router, prefix=f"{API}/auth/2fa", tags=["Two-factor"])
+app.include_router(account.router, prefix=f"{API}/account", tags=["Account"])
+app.include_router(career.router, prefix=API, tags=["Career"])
+app.include_router(career.files_router, prefix=f"{API}/files", tags=["Files"])
+app.include_router(admin_ops.me_router, prefix=f"{API}/admin", tags=["Admin - ops"])
+app.include_router(admin_ops.router, prefix=f"{API}/admin", tags=["Admin - ops"])
+app.include_router(admin_events.router, prefix=f"{API}/admin", tags=["Admin - events"])
+app.include_router(admin_system.router, prefix=f"{API}/admin", tags=["Admin - system"])
+app.include_router(support.router, prefix=API, tags=["Support"])
+app.include_router(support.admin_router, prefix=f"{API}/admin", tags=["Admin - support"])
+app.include_router(payments.admin_router, prefix=f"{API}/admin", tags=["Admin - payments"])
+app.include_router(announcements.public_router, prefix=API, tags=["Announcements"])
+app.include_router(announcements.admin_router, prefix=f"{API}/admin", tags=["Admin - announcements"])
 app.include_router(admin_learning.router, prefix=f"{API}/admin", tags=["Admin - learning"])
 app.include_router(resumes.files_router, prefix=f"{API}/files", tags=["Files"])

@@ -308,7 +308,7 @@ def test_google_login_disabled_when_not_configured(client):
 
 # ------------------------------------------------------------------ production guards
 def _boot(**env):
-    e = {k: v for k, v in os.environ.items() if k not in ("JWT_SECRET", "ENV", "EXPOSE_RESET_TOKEN", "CORS_ORIGINS")}
+    e = {k: v for k, v in os.environ.items() if k not in ("JWT_SECRET", "ENV", "EXPOSE_RESET_TOKEN", "EXPOSE_OTP", "CORS_ORIGINS")}
     e.update({"MONGO_URI": "mongomock://", "PYTHONPATH": os.environ.get("PYTHONPATH", "") + os.pathsep + str(BACKEND), **env})
     return subprocess.run([sys.executable, "-c", "import app.config"], cwd=BACKEND, env=e, capture_output=True, text=True)
 
@@ -318,12 +318,13 @@ def test_production_refuses_weak_configuration():
     assert "JWT_SECRET" in _boot(ENV="production", JWT_SECRET="short").stderr
     assert "EXPOSE_RESET_TOKEN" in _boot(ENV="production", JWT_SECRET="x" * 40, EXPOSE_RESET_TOKEN="true").stderr
     assert "CORS_ORIGINS" in _boot(ENV="production", JWT_SECRET="x" * 40, CORS_ORIGINS="*").stderr
+    assert "EXPOSE_OTP" in _boot(ENV="production", JWT_SECRET="x" * 40, EXPOSE_OTP="true").stderr
     assert _boot(ENV="production", JWT_SECRET="x" * 40, CORS_ORIGINS="https://carevo.example").returncode == 0
 
 
 def test_docs_hidden_in_production():
     code = "import app.main as m; print(m.app.docs_url, m.app.openapi_url)"
-    e = {**{k: v for k, v in os.environ.items() if k != "EXPOSE_RESET_TOKEN"}, "MONGO_URI": "mongomock://", "ENV": "production", "JWT_SECRET": "x" * 40, "CORS_ORIGINS": "https://carevo.example", "PYTHONPATH": os.environ.get("PYTHONPATH", "") + os.pathsep + str(BACKEND)}
+    e = {**{k: v for k, v in os.environ.items() if k not in ("EXPOSE_RESET_TOKEN", "EXPOSE_OTP")}, "MONGO_URI": "mongomock://", "ENV": "production", "JWT_SECRET": "x" * 40, "CORS_ORIGINS": "https://carevo.example", "PYTHONPATH": os.environ.get("PYTHONPATH", "") + os.pathsep + str(BACKEND)}
     out = subprocess.run([sys.executable, "-c", code], cwd=BACKEND, env=e, capture_output=True, text=True)
     assert out.stdout.strip().endswith("None None"), out.stderr
 

@@ -10,6 +10,8 @@ os.environ["ADMIN_EMAIL"] = "admin@carevo.test"
 os.environ["ADMIN_PASSWORD"] = "Admin@12345"
 os.environ["EXPOSE_RESET_TOKEN"] = "true"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+os.environ["EXPOSE_OTP"] = "true"
+os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["UPLOAD_DIR"] = tempfile.mkdtemp(prefix="carevo-uploads-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

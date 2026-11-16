@@ -12,6 +12,7 @@ class UserRegister(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=20)
     # Admins can never be self-registered.
     role: Literal["user", "recruiter"] = "user"
+    referral_code: Optional[str] = Field(default=None, max_length=20)
 
 
 class UserLogin(BaseModel):

@@ -86,6 +86,20 @@ def send(data: MessageIn, user=Depends(get_current_user)):
     receiver = users_collection.find_one({"_id": rid, "is_active": True})
     if not receiver:
         raise HTTPException(404, "Recipient not found")
+    from app.routes.account import is_blocked_between
+
+    if is_blocked_between(user["_id"], rid):
+        raise HTTPException(403, "You cannot message this person")
+    if user["role"] != "admin" and receiver["role"] == "user":
+        mode = (receiver.get("privacy") or {}).get("allow_messages", "everyone")
+        if mode == "none":
+            raise HTTPException(403, "This candidate is not accepting messages")
+        if mode == "applied":
+            from app.database import applications_collection, jobs_collection
+
+            mine = [j["_id"] for j in jobs_collection.find({"recruiter_id": user["_id"]}, {"_id": 1})]
+            if user["role"] != "recruiter" or not applications_collection.find_one({"user_id": rid, "job_id": {"$in": mine}}):
+                raise HTTPException(403, "This candidate only accepts messages from recruiters they applied to")
     text = data.message.strip()
     doc = {"sender_id": user["_id"], "receiver_id": rid, "message": text, "is_read": False, "created_at": now()}
     if data.attachment:

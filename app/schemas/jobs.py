@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.common import HttpUrl
 
-JobType = Literal["fulltime", "parttime", "internship", "contract"]
+JobType = Literal["fulltime", "parttime", "internship", "contract", "freelance"]
+WorkMode = Literal["remote", "hybrid", "onsite"]
 JobStatus = Literal["pending", "approved", "rejected"]
 ApplicationStatus = Literal["applied", "shortlisted", "rejected", "accepted"]
 
@@ -30,6 +31,24 @@ class CompanyUpdate(BaseModel):
     location: Optional[str] = Field(default=None, max_length=150)
 
 
+class ScreeningQuestion(BaseModel):
+    id: Optional[str] = Field(default=None, max_length=40)
+    type: Literal["text", "choice", "yesno"] = "text"
+    question: str = Field(min_length=3, max_length=300)
+    options: list[str] = Field(default_factory=list, max_length=8)
+    required: bool = True
+    kind: Literal["general", "experience", "qualification"] = "general"
+
+    @model_validator(mode="after")
+    def _opts(self):
+        self.options = [o.strip() for o in self.options if o.strip()]
+        if self.type == "choice" and len(self.options) < 2:
+            raise ValueError("Multiple-choice questions need at least two options")
+        if self.type != "choice":
+            self.options = []
+        return self
+
+
 class JobIn(BaseModel):
     title: str = Field(min_length=3, max_length=150)
     description: str = Field(min_length=10, max_length=10000)
@@ -46,6 +65,8 @@ class JobIn(BaseModel):
     apply_url: HttpUrl = None
     application_deadline: Optional[datetime] = None
     is_active: bool = True
+    work_mode: Optional[WorkMode] = None
+    screening_questions: list["ScreeningQuestion"] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def _salary_range(self):
@@ -68,11 +89,14 @@ class JobUpdate(BaseModel):
     clear_apply_url: bool = False
     application_deadline: Optional[datetime] = None
     is_active: Optional[bool] = None
+    work_mode: Optional[WorkMode] = None
+    screening_questions: Optional[list[ScreeningQuestion]] = Field(default=None, max_length=10)
 
 
 class ApplicationCreate(BaseModel):
     resume_id: Optional[str] = None
     cover_letter: Optional[str] = Field(default=None, max_length=5000)
+    answers: dict[str, str] = Field(default_factory=dict)
 
 
 class ApplicationStatusUpdate(BaseModel):

@@ -123,6 +123,10 @@ def create_job(data: JobIn, user=Depends(require_recruiter)):
     doc = build_job_document(data, company, user["_id"], status)
     doc["_id"] = jobs_collection.insert_one(dict(doc)).inserted_id
     sync_job_skills(doc["_id"], doc["skills"])
+    if status == "approved":
+        from app.routes.career import notify_followers_of_job
+
+        notify_followers_of_job(doc)
     if status == "pending":
         for admin in users_collection.find({"role": "admin", "is_active": True}):
             notify(admin["_id"], "Job awaiting approval", f"{doc['title']} by {company['name']}", "job", "/admin/jobs")

@@ -17,6 +17,8 @@ RULES = [
     ("/api/auth/reset-password", "POST", 10, 900),
     ("/api/public/newsletter", "POST", 5, 3600),
     ("/api/media/upload", "POST", 30, 60),
+    ("/api/payments/order", "POST", 10, 60),
+    ("/api/payments/verify", "POST", 20, 60),
     ("/api/", None, 600, 60),  # everything else, per IP
 ]
 

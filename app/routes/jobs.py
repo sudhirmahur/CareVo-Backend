@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.database import (
     applications_collection,
+    job_views_collection,
     companies_collection,
     jobs_collection,
     resumes_collection,
@@ -15,7 +16,7 @@ from app.database import (
 )
 from app.dependencies.auth import get_current_user, get_optional_user, require_roles
 from app.schemas.jobs import ApplicationCreate
-from app.services.jobs import is_expired, public_visibility, shape_jobs
+from app.services.jobs import is_expired, public_visibility, shape_jobs, validate_answers
 from app.services.notify import notify
 from app.utils import clean_list, get_or_404, now, oid, rx, ser
 
@@ -128,7 +129,7 @@ def saved_jobs(user=Depends(get_current_user)):
 
 
 @router.get("/{job_id}")
-def get_job(job_id: str, user=Depends(get_optional_user)):
+def get_job(job_id: str, src: Optional[str] = Query(default=None, max_length=30), user=Depends(get_optional_user)):
     _id = oid(job_id, "job ID")
     job = jobs_collection.find_one({"_id": _id})
     owner_view = bool(
@@ -137,6 +138,8 @@ def get_job(job_id: str, user=Depends(get_optional_user)):
     if not job or (not owner_view and (job.get("status") != "approved" or not job.get("is_active"))):
         raise HTTPException(404, "Job not found")
     jobs_collection.update_one({"_id": _id}, {"$inc": {"views_count": 1}})
+    if not owner_view:
+        job_views_collection.insert_one({"job_id": _id, "company_id": job.get("company_id"), "recruiter_id": job.get("recruiter_id"), "at": now(), "source": (src or "direct").lower()})
     job["views_count"] = job.get("views_count", 0) + 1
     return shape_jobs([job], user, full=True)[0]
 
@@ -186,6 +189,7 @@ def apply_for_job(job_id: str, data: ApplicationCreate, user=Depends(require_rol
             "source": existing.get("source", "internal"),
         }
 
+    answers = validate_answers(job, data.answers)
     resume_id = None
     if data.resume_id:
         resume = get_or_404(
@@ -214,6 +218,7 @@ def apply_for_job(job_id: str, data: ApplicationCreate, user=Depends(require_rol
         "apply_url": apply_url,
         "job_title": job.get("title"),
         "company_name": company.get("name"),
+        "answers": answers,
         "status_history": [{"status": "applied", "at": ts, "note": None}],
         "applied_at": ts,
         "updated_at": ts,

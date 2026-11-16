@@ -340,6 +340,9 @@ def create_job(data: JobIn, admin=Depends(require_admin)):
     doc = build_job_document(data, company, company["recruiter_id"], "approved")
     doc["_id"] = jobs_collection.insert_one(dict(doc)).inserted_id
     sync_job_skills(doc["_id"], doc["skills"])
+    from app.routes.career import notify_followers_of_job
+
+    notify_followers_of_job(doc)
     return shape_jobs([doc])[0]
 
 
@@ -367,6 +370,10 @@ def set_job_status(job_id: str, data: AdminJobStatus):
         "updated_at": now(),
     }
     jobs_collection.update_one({"_id": job["_id"]}, {"$set": values})
+    if data.status == "approved" and job.get("status") != "approved":
+        from app.routes.career import notify_followers_of_job
+
+        notify_followers_of_job(job)
     if data.status != job.get("status") and job.get("recruiter_id"):
         text = {"approved": "was approved and is now live", "rejected": "was rejected", "pending": "was moved back to review"}[data.status]
         notify(
@@ -509,11 +516,11 @@ def list_reports(
         item = ser(r)
         rep = users_collection.find_one({"_id": r["reporter_id"]}, {"name": 1, "email": 1})
         item["reporter"] = {"id": str(rep["_id"]), "name": rep["name"], "email": rep["email"]} if rep else None
-        coll = {"job": jobs_collection, "user": users_collection, "video": videos_collection, "comment": video_comments_collection}[r["content_type"]]
+        coll = {"job": jobs_collection, "user": users_collection, "video": videos_collection, "comment": video_comments_collection, "message": messages_collection}[r["content_type"]]
         target = coll.find_one({"_id": r["content_id"]})
         item["target_exists"] = target is not None
         item["target_label"] = (
-            (target.get("title") or target.get("name") or target.get("comment", "")[:60]) if target else "(removed)"
+            (target.get("title") or target.get("name") or target.get("comment", "")[:60] or target.get("message", "")[:60]) if target else "(removed)"
         )
         return item
 
@@ -610,30 +617,6 @@ def delete_category(category_id: str):
     return {"message": "Category deleted"}
 
 
-@router.get("/banners")
-def list_banners():
-    return {"items": [ser(b) for b in banners_collection.find({}).sort("created_at", -1)]}
-
-
-@router.post("/banners", status_code=201)
-def create_banner(data: BannerIn):
-    doc = {**data.model_dump(), "created_at": now()}
-    doc["_id"] = banners_collection.insert_one(dict(doc)).inserted_id
-    return ser(doc)
-
-
-@router.patch("/banners/{banner_id}")
-def toggle_banner(banner_id: str):
-    b = get_or_404(banners_collection, oid(banner_id, "banner ID"), "Banner")
-    banners_collection.update_one({"_id": b["_id"]}, {"$set": {"is_active": not b.get("is_active", True)}})
-    return {"is_active": not b.get("is_active", True)}
-
-
-@router.delete("/banners/{banner_id}")
-def delete_banner(banner_id: str):
-    b = get_or_404(banners_collection, oid(banner_id, "banner ID"), "Banner")
-    banners_collection.delete_one({"_id": b["_id"]})
-    return {"message": "Banner deleted"}
 
 
 @router.get("/settings")
