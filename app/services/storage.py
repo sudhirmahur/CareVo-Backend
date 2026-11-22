@@ -170,3 +170,103 @@ def delete_by_url(url: Optional[str]) -> None:
         media_collection.delete_one({"_id": rec["_id"]})
     except Exception:  # pragma: no cover - cleanup must never break the request
         pass
+
+
+# ======================================================================== private files
+# Resumes, vault documents and file answers are personal data. They are never public:
+#   * Cloudinary: uploaded as resource_type "raw" with type "authenticated" (no public URL exists); the API
+#     downloads them with a signed request only after our own signed, short-lived link has been checked.
+#   * Local disk (development): stored under UPLOAD_DIR/<folder>, which the public /uploads mount refuses to serve.
+PRIVATE_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _get(url: str, timeout: int = 60) -> bytes:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https endpoint from config
+            data = resp.read(PRIVATE_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise HTTPException(404 if e.code == 404 else 502, "File not found" if e.code == 404 else "Media storage rejected the request")
+    except Exception:
+        raise HTTPException(502, "Media storage is unreachable. Please try again.")
+    if len(data) > PRIVATE_MAX_BYTES:
+        raise HTTPException(502, "Stored file is too large")
+    return data
+
+
+def store_private(content: bytes, ext: str, folder: str) -> dict:
+    """Persist bytes privately. Returns {"provider": "cloudinary"|"local", "ref": <public_id or relative path>}."""
+    ext = ext.lower().lstrip(".")
+    if cloudinary_enabled():
+        public_id = f"{config.CLOUDINARY_FOLDER}/{folder}/{uuid.uuid4().hex}.{ext}"
+        params = {"public_id": public_id, "timestamp": str(int(time.time())), "type": "authenticated"}
+        fields = {**params, "api_key": config.CLOUDINARY_API_KEY, "signature": _sign(params)}
+        body, ctype = _multipart(fields, "file", f"file.{ext}", content, "application/octet-stream")
+        data = _post(f"{config.CLOUDINARY_API_BASE}/{config.CLOUDINARY_CLOUD_NAME}/raw/upload", body, ctype)
+        ref = data.get("public_id")
+        if not ref:
+            raise HTTPException(502, "Media storage returned an unexpected response")
+        return {"provider": "cloudinary", "ref": ref}
+    directory = config.UPLOAD_DIR / folder
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}.{ext}"
+    (directory / name).write_bytes(content)
+    return {"provider": "local", "ref": f"{folder}/{name}"}
+
+
+def read_private(provider: Optional[str], ref: Optional[str]) -> bytes:
+    if not ref:
+        raise HTTPException(404, "File not found")
+    if provider == "cloudinary":
+        if not cloudinary_enabled():
+            raise HTTPException(503, "Media storage is not configured")
+        params = {"public_id": ref, "timestamp": str(int(time.time())), "type": "authenticated"}
+        q = {**params, "api_key": config.CLOUDINARY_API_KEY, "signature": _sign(params)}
+        qs = "&".join(f"{k}={urllib.request.quote(str(v), safe='')}" for k, v in q.items())
+        return _get(f"{config.CLOUDINARY_API_BASE}/{config.CLOUDINARY_CLOUD_NAME}/raw/download?{qs}")
+    path = (config.UPLOAD_DIR / ref).resolve()
+    if not str(path).startswith(str(config.UPLOAD_DIR.resolve())) or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return path.read_bytes()
+
+
+def delete_private(provider: Optional[str], ref: Optional[str]) -> None:
+    """Best-effort removal (never raises)."""
+    if not ref:
+        return
+    try:
+        if provider == "cloudinary" and cloudinary_enabled():
+            params = {"public_id": ref, "timestamp": str(int(time.time())), "type": "authenticated"}
+            fields = {**params, "api_key": config.CLOUDINARY_API_KEY, "signature": _sign(params)}
+            body = "&".join(f"{k}={urllib.request.quote(str(v), safe='')}" for k, v in fields.items()).encode()
+            _post(f"{config.CLOUDINARY_API_BASE}/{config.CLOUDINARY_CLOUD_NAME}/raw/destroy", body, "application/x-www-form-urlencoded", 30)
+        elif provider in (None, "local"):
+            path = (config.UPLOAD_DIR / ref).resolve()
+            if str(path).startswith(str(config.UPLOAD_DIR.resolve())) and path.is_file():
+                os.remove(path)
+    except Exception:  # pragma: no cover
+        pass
+
+
+# ======================================================================== video delivery
+_CLD_VIDEO = re.compile(r"^(https://res\.cloudinary\.com/[^/]+/video/upload/)(v\d+/.+?)(\.[A-Za-z0-9]+)?$")
+
+
+def playback_url(url: Optional[str]) -> Optional[str]:
+    """URL the <video> element should use.
+
+    Cloudinary originals are often HEVC .mov (iPhone) or .webm, which Chrome/Firefox/Android cannot all play.
+    Asking Cloudinary for f_mp4 + H.264 + auto quality makes every browser able to play the same upload.
+    """
+    m = _CLD_VIDEO.match(url or "")
+    if not m:
+        return url
+    return f"{m.group(1)}f_mp4,vc_h264,ac_aac,q_auto/{m.group(2)}.mp4"
+
+
+def poster_url(url: Optional[str]) -> Optional[str]:
+    """First-frame poster for a Cloudinary video (so_0), None for other hosts."""
+    m = _CLD_VIDEO.match(url or "")
+    if not m:
+        return None
+    return f"{m.group(1)}so_0,f_jpg,w_720,q_auto/{m.group(2)}.jpg"

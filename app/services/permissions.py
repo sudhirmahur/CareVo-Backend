@@ -12,10 +12,10 @@ MODULES = {
 }
 SEGMENT = {
     "stats": "dashboard", "users": "users", "premium-requests": "users", "deletion-requests": "users", "recruiters": "recruiters", "companies": "companies", "jobs": "jobs", "applications": "applications",
-    "interviews": "interviews", "videos": "videos", "reports": "reports", "skills": "skills", "skill-categories": "skills", "banners": "content", "popups": "content", "site-content": "content",
+    "interviews": "interviews", "offers": "applications", "videos": "videos", "reports": "reports", "skills": "skills", "skill-categories": "skills", "banners": "content", "popups": "content", "site-content": "content",
     "newsletter": "content", "notifications": "content", "prep": "content", "assessments": "content", "events": "content", "plans": "payments", "payments": "payments", "subscriptions": "payments",
     "support": "support", "feedback": "support", "settings": "settings", "roles": "roles", "admins": "roles", "email-templates": "emails", "emails": "emails", "analytics": "analytics",
-    "health": "system", "backups": "system", "exports": "system", "audit-logs": "system",
+    "media": "system", "health": "system", "backups": "system", "exports": "system", "audit-logs": "system",
 }
 METHOD_ACTION = {"GET": "read", "HEAD": "read", "POST": "create", "PUT": "update", "PATCH": "update", "DELETE": "delete"}
 

@@ -1,4 +1,5 @@
 """Shared job helpers: skill sync, response shaping, visibility rules."""
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -165,24 +166,74 @@ def delete_job_cascade(job_id) -> None:
     jobs_collection.delete_one({"_id": job_id})
 
 
-def validate_answers(job: dict, given: dict) -> list:
-    """Check candidate answers against the job's screening questions; returns the snapshot stored on the application."""
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+
+
+def validate_answers(job: dict, given: dict, user: dict = None) -> list:
+    """Check candidate answers against the job's questions; returns the snapshot stored on the application.
+
+    Snapshot row: question_id, question, type, kind, answer (always text - for multiple choice the picks joined
+    by ", "), plus `values` (multiple choice) or `file_id` / `file_name` (file questions).
+    """
     from fastapi import HTTPException
 
+    from app.database import answer_files_collection
+
+    given = given or {}
+    known = {q["id"] for q in job.get("screening_questions") or []}
+    if any(k not in known for k in given):
+        raise HTTPException(422, "Answers contain a question that does not belong to this job")
     out = []
     for q in job.get("screening_questions") or []:
-        a = str((given or {}).get(q["id"], "")).strip()
+        raw = given.get(q["id"])
+        picks = [str(x).strip() for x in raw] if isinstance(raw, list) else None
+        a = ", ".join(p for p in picks if p) if picks is not None else str(raw if raw is not None else "").strip()
         if not a:
             if q.get("required", True):
                 raise HTTPException(422, f"Please answer: {q['question']}")
             continue
-        if len(a) > 1000:
+        t = q["type"]
+        if picks is not None and t != "multiple":
+            raise HTTPException(422, f"Give a single answer: {q['question']}")
+        if len(a) > (4000 if t == "long_text" else 1000):
             raise HTTPException(422, f"Answer is too long: {q['question']}")
-        if q["type"] == "yesno" and a.lower() not in ("yes", "no"):
-            raise HTTPException(422, f"Answer Yes or No: {q['question']}")
-        if q["type"] == "choice" and a not in q.get("options", []):
-            raise HTTPException(422, f"Pick one of the options: {q['question']}")
-        if q["type"] == "yesno":
+        row = {"question_id": q["id"], "question": q["question"], "type": t, "kind": q.get("kind", "general")}
+        if t == "yesno":
+            if a.lower() not in ("yes", "no"):
+                raise HTTPException(422, f"Answer Yes or No: {q['question']}")
             a = a.capitalize()
-        out.append({"question_id": q["id"], "question": q["question"], "type": q["type"], "kind": q.get("kind", "general"), "answer": a})
+        elif t == "choice":
+            if a not in q.get("options", []):
+                raise HTTPException(422, f"Pick one of the options: {q['question']}")
+        elif t == "multiple":
+            vals = picks if picks is not None else [x.strip() for x in a.split(",")]
+            vals = [v for v in dict.fromkeys(vals) if v]
+            if not vals or any(v not in q.get("options", []) for v in vals):
+                raise HTTPException(422, f"Pick from the given options: {q['question']}")
+            a = ", ".join(vals)
+            row["values"] = vals
+        elif t == "number":
+            try:
+                num = float(a)
+            except ValueError:
+                raise HTTPException(422, f"Enter a number: {q['question']}")
+            if num != num or num in (float("inf"), float("-inf")):
+                raise HTTPException(422, f"Enter a valid number: {q['question']}")
+        elif t == "email":
+            if not EMAIL_RE.match(a) or len(a) > 254:
+                raise HTTPException(422, f"Enter a valid e-mail address: {q['question']}")
+            a = a.lower()
+        elif t == "file":
+            try:
+                fid = ObjectId(a)
+            except Exception:
+                raise HTTPException(422, f"Upload a file for: {q['question']}")
+            f = answer_files_collection.find_one({"_id": fid, "job_id": job["_id"], **({"user_id": user["_id"]} if user else {})})
+            if not f:
+                raise HTTPException(422, f"Upload a file for: {q['question']}")
+            row["file_id"] = str(fid)
+            row["file_name"] = f["name"]
+            a = f["name"]
+        row["answer"] = a
+        out.append(row)
     return out

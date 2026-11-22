@@ -28,11 +28,11 @@ from app.database import (
 )
 from app.dependencies.auth import get_current_user, require_roles
 from app.schemas.common import Email
-from app.services import simplepdf
+from app.services import simplepdf, storage
 from app.services.email import send_template
 from app.services.jobs import public_visibility, shape_jobs
 from app.services.notify import notify
-from app.services.offers import letter_paragraphs, offer_out
+from app.services.offers import letter_paragraphs, offer_out, render_pdf
 from app.utils import get_or_404, now, oid, paginate, ser
 
 router = APIRouter(dependencies=[Depends(require_roles("user"))])
@@ -211,10 +211,9 @@ async def upload_document(file: UploadFile = File(...), category: str = Form("ot
     if documents_collection.count_documents({"user_id": user["_id"]}) >= MAX_DOCS:
         raise HTTPException(400, f"You can store up to {MAX_DOCS} documents. Delete some first.")
     content, original, ext = await _read_validated(file)
-    stored = f"{uuid.uuid4()}{ext}"
-    (DOC_DIR / stored).write_bytes(content)
+    saved = storage.store_private(content, ext, "documents")
     ts = now()
-    doc = {"user_id": user["_id"], "title": (title.strip() or os.path.splitext(original)[0])[:120], "category": category, "filename": original, "stored_name": stored, "size": len(content), "created_at": ts, "updated_at": ts}
+    doc = {"user_id": user["_id"], "title": (title.strip() or os.path.splitext(original)[0])[:120], "category": category, "filename": original, "stored_name": os.path.basename(saved["ref"]), "storage": saved["provider"], "storage_ref": saved["ref"], "size": len(content), "created_at": ts, "updated_at": ts}
     doc["_id"] = documents_collection.insert_one(dict(doc)).inserted_id
     return _doc_out(doc)
 
@@ -223,12 +222,9 @@ async def upload_document(file: UploadFile = File(...), category: str = Form("ot
 async def replace_document(doc_id: str, file: UploadFile = File(...), user=Depends(get_current_user)):
     d = get_or_404(documents_collection, oid(doc_id, "document ID"), "Document", {"user_id": user["_id"]})
     content, original, ext = await _read_validated(file)
-    stored = f"{uuid.uuid4()}{ext}"
-    (DOC_DIR / stored).write_bytes(content)
-    old = DOC_DIR / os.path.basename(d.get("stored_name", ""))
-    documents_collection.update_one({"_id": d["_id"]}, {"$set": {"filename": original, "stored_name": stored, "size": len(content), "updated_at": now()}})
-    if old.is_file():
-        old.unlink()
+    saved = storage.store_private(content, ext, "documents")
+    documents_collection.update_one({"_id": d["_id"]}, {"$set": {"filename": original, "stored_name": os.path.basename(saved["ref"]), "storage": saved["provider"], "storage_ref": saved["ref"], "size": len(content), "updated_at": now()}})
+    _drop_doc_file(d)
     return _doc_out(documents_collection.find_one({"_id": d["_id"]}))
 
 
@@ -252,10 +248,18 @@ def update_document(doc_id: str, data: DocUpdate, user=Depends(get_current_user)
 def delete_document(doc_id: str, user=Depends(get_current_user)):
     d = get_or_404(documents_collection, oid(doc_id, "document ID"), "Document", {"user_id": user["_id"]})
     documents_collection.delete_one({"_id": d["_id"]})
-    p = DOC_DIR / os.path.basename(d.get("stored_name", ""))
-    if p.is_file():
-        p.unlink()
+    _drop_doc_file(d)
     return {"message": "Document deleted"}
+
+
+def _doc_ref(d: dict) -> tuple:
+    if d.get("storage_ref"):
+        return d.get("storage"), d["storage_ref"]
+    return "local", "documents/" + os.path.basename(d.get("stored_name", "x"))  # rows from before Cloudinary storage
+
+
+def _drop_doc_file(d: dict) -> None:
+    storage.delete_private(*_doc_ref(d))
 
 
 def _doc_sig(doc_id: str, exp: int, download: int) -> str:
@@ -278,12 +282,12 @@ def document_file(doc_id: str, exp: int = Query(...), dl: int = Query(0), sig: s
     if exp < time.time() or not hmac.compare_digest(sig, _doc_sig(doc_id, exp, dl)):
         raise HTTPException(403, "This link is invalid or has expired")
     d = documents_collection.find_one({"_id": oid(doc_id, "document ID")})
-    path = DOC_DIR / os.path.basename((d or {}).get("stored_name", "x"))
-    if not d or not path.is_file():
+    if not d:
         raise HTTPException(404, "File not found")
-    ext = path.suffix.lower()
+    data = storage.read_private(*_doc_ref(d))
+    ext = os.path.splitext(d.get("stored_name") or d["filename"])[1].lower()
     safe = "".join(c for c in d["filename"] if c.isalnum() or c in " ._-")[:100] or "document"
-    return FileResponse(path, media_type=MIME.get(ext, "application/octet-stream"), headers={"Content-Disposition": f"{'attachment' if dl else 'inline'}; filename=\"{safe}\"", "X-Content-Type-Options": "nosniff"})
+    return Response(data, media_type=MIME.get(ext, "application/octet-stream"), headers={"Content-Disposition": f"{'attachment' if dl else 'inline'}; filename=\"{safe}\"", "X-Content-Type-Options": "nosniff"})
 
 
 # =========================================================== referrals & rewards
@@ -468,8 +472,7 @@ def my_offer(offer_id: str, user=Depends(get_current_user)):
 @router.get("/me/offers/{offer_id}/pdf")
 def my_offer_pdf(offer_id: str, user=Depends(get_current_user)):
     o = get_or_404(offers_collection, oid(offer_id, "offer ID"), "Offer", {"candidate_id": user["_id"], "status": {"$ne": "draft"}})
-    title, paras = letter_paragraphs(o)
-    return Response(simplepdf.build(title, paras, footer=o["company_name"]), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=offer-{str(o['_id'])[-6:]}.pdf"})
+    return Response(render_pdf(o), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=offer-{str(o['_id'])[-6:]}.pdf"})
 
 
 class RespondIn(BaseModel):

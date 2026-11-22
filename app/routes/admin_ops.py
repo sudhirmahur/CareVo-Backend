@@ -196,6 +196,68 @@ def health_snapshot(save: bool = True) -> dict:
     return ser(snap)
 
 
+@router.get("/offers")
+def admin_offers(status: Optional[str] = None, q: Optional[str] = Query(None, max_length=80), page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
+    """All offer letters on the platform (read-only oversight; recruiters create and send them)."""
+    from app.database import offers_collection
+    from app.services.offers import offer_out
+    import re as _re
+
+    f = {}
+    if status:
+        f["status"] = status
+    if q:
+        rx = {"$regex": _re.escape(q.strip()), "$options": "i"}
+        f["$or"] = [{"candidate_name": rx}, {"company_name": rx}, {"designation": rx}]
+    total = offers_collection.count_documents(f)
+    rows = list(offers_collection.find(f).sort("created_at", -1).skip((page - 1) * limit).limit(limit))
+    counts = {}
+    for r in offers_collection.find({}, {"status": 1}):
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"items": [offer_out(r) for r in rows], "total": total, "page": page, "pages": max(1, -(-total // limit)), "counts": counts}
+
+
+@router.get("/offers/{offer_id}/pdf")
+def admin_offer_pdf(offer_id: str):
+    from fastapi.responses import Response
+    from app.database import offers_collection
+    from app.services.offers import render_pdf
+
+    o = get_or_404(offers_collection, oid(offer_id, "offer ID"), "Offer")
+    return Response(render_pdf(o), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=offer-{str(o['_id'])[-6:]}.pdf", "Cache-Control": "private, no-store"})
+
+
+@router.get("/media/diagnostics")
+def media_diagnostics():
+    """Why might reels not play? Shows storage provider and finds videos whose file no longer exists
+    (typical after a deploy when files were kept on the server's temporary disk)."""
+    from app.database import videos_collection
+    from app.services import storage
+
+    rows = list(videos_collection.find({"is_removed": {"$ne": True}}, {"title": 1, "video_url": 1, "thumbnail_url": 1}))
+    summary = {"cloudinary": 0, "local": 0, "external": 0}
+    broken = []
+    for v in rows:
+        url = v.get("video_url") or ""
+        if url.startswith("/uploads/"):
+            summary["local"] += 1
+            path = (config.UPLOAD_DIR / url[len("/uploads/"):]).resolve()
+            if not str(path).startswith(str(config.UPLOAD_DIR.resolve())) or not path.is_file():
+                broken.append({"id": str(v["_id"]), "title": v.get("title"), "video_url": url, "reason": "File is missing on the server (temporary disk was reset). Re-upload it."})
+        elif "res.cloudinary.com" in url:
+            summary["cloudinary"] += 1
+        else:
+            summary["external"] += 1
+    return {
+        "provider": storage.provider(),
+        "cloudinary_configured": storage.cloudinary_enabled(),
+        "videos": len(rows),
+        "by_storage": summary,
+        "missing": broken,
+        "advice": None if storage.cloudinary_enabled() else "Cloudinary is not configured: uploads go to the server disk, which is erased on every Render deploy. Set CLOUDINARY_URL.",
+    }
+
+
 @router.get("/health")
 def health():
     return health_snapshot()

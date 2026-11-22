@@ -1,9 +1,13 @@
 """Public job board + candidate actions (save / apply)."""
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import os
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from app.database import (
+    answer_files_collection,
     applications_collection,
     job_views_collection,
     companies_collection,
@@ -17,6 +21,7 @@ from app.database import (
 from app.dependencies.auth import get_current_user, get_optional_user, require_roles
 from app.schemas.jobs import ApplicationCreate
 from app.services.jobs import is_expired, public_visibility, shape_jobs, validate_answers
+from app.services import storage
 from app.services.notify import notify
 from app.utils import clean_list, get_or_404, now, oid, rx, ser
 
@@ -162,6 +167,36 @@ def unsave_job(job_id: str, user=Depends(get_current_user)):
     return {"message": "Job removed from saved", "is_saved": False}
 
 
+ANSWER_FILE_EXT = {".pdf": b"%PDF", ".docx": b"PK", ".doc": b"\xd0\xcf\x11\xe0", ".png": b"\x89PNG", ".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff"}
+ANSWER_FILE_MB = 8
+
+
+@router.post("/{job_id}/answer-file", status_code=201)
+async def upload_answer_file(job_id: str, file: UploadFile = File(...), user=Depends(require_roles("user"))):
+    """Upload a file for a "file" screening question. The returned `file_id` goes into `answers[question_id]`.
+    Files are private (Cloudinary authenticated storage / non-public disk folder)."""
+    job = get_or_404(jobs_collection, oid(job_id, "job ID"), "Job", public_visibility())
+    if not any(q.get("type") == "file" for q in job.get("screening_questions") or []):
+        raise HTTPException(400, "This job does not ask for a file")
+    if answer_files_collection.count_documents({"user_id": user["_id"], "created_at": {"$gte": now() - timedelta(hours=1)}}) >= 20:
+        raise HTTPException(429, "Upload limit reached. Please try again later.")
+    original = os.path.basename(file.filename or "file")
+    ext = os.path.splitext(original)[1].lower()
+    if ext not in ANSWER_FILE_EXT:
+        raise HTTPException(400, "Allowed files: PDF, DOC, DOCX, PNG, JPG")
+    content = await file.read(ANSWER_FILE_MB * 1024 * 1024 + 1)
+    if not content:
+        raise HTTPException(400, "The file is empty")
+    if len(content) > ANSWER_FILE_MB * 1024 * 1024:
+        raise HTTPException(400, f"File is too large (max {ANSWER_FILE_MB} MB)")
+    if not content.startswith(ANSWER_FILE_EXT[ext]):
+        raise HTTPException(400, f"The file content does not look like a valid {ext.strip('.').upper()} file")
+    saved = storage.store_private(content, ext, "answers")
+    doc = {"user_id": user["_id"], "job_id": job["_id"], "name": original[:150], "size": len(content), "storage": saved["provider"], "storage_ref": saved["ref"], "created_at": now()}
+    doc["_id"] = answer_files_collection.insert_one(dict(doc)).inserted_id
+    return {"file_id": str(doc["_id"]), "name": doc["name"], "size": doc["size"]}
+
+
 @router.post("/{job_id}/apply", status_code=201)
 def apply_for_job(job_id: str, data: ApplicationCreate, user=Depends(require_roles("user"))):
     """Apply to a job.
@@ -189,7 +224,7 @@ def apply_for_job(job_id: str, data: ApplicationCreate, user=Depends(require_rol
             "source": existing.get("source", "internal"),
         }
 
-    answers = validate_answers(job, data.answers)
+    answers = validate_answers(job, data.answers, user)
     resume_id = None
     if data.resume_id:
         resume = get_or_404(

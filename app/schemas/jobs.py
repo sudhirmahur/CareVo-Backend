@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -31,20 +31,28 @@ class CompanyUpdate(BaseModel):
     location: Optional[str] = Field(default=None, max_length=150)
 
 
+MAX_QUESTIONS = 25
+
+
 class ScreeningQuestion(BaseModel):
     id: Optional[str] = Field(default=None, max_length=40)
-    type: Literal["text", "choice", "yesno"] = "text"
+    # text = short text, long_text, choice = single choice, multiple = multiple choice, yesno, number, email, file
+    type: Literal["text", "long_text", "choice", "multiple", "yesno", "number", "email", "file"] = "text"
     question: str = Field(min_length=3, max_length=300)
-    options: list[str] = Field(default_factory=list, max_length=8)
+    options: list[str] = Field(default_factory=list, max_length=12)
     required: bool = True
     kind: Literal["general", "experience", "qualification"] = "general"
 
     @model_validator(mode="after")
     def _opts(self):
         self.options = [o.strip() for o in self.options if o.strip()]
-        if self.type == "choice" and len(self.options) < 2:
-            raise ValueError("Multiple-choice questions need at least two options")
-        if self.type != "choice":
+        if self.type in ("choice", "multiple") and len(self.options) < 2:
+            raise ValueError("Choice questions need at least two options")
+        if len({o.lower() for o in self.options}) != len(self.options):
+            raise ValueError("Options must be different from each other")
+        if any(len(o) > 100 for o in self.options):
+            raise ValueError("Each option can be at most 100 characters")
+        if self.type not in ("choice", "multiple"):
             self.options = []
         return self
 
@@ -66,7 +74,7 @@ class JobIn(BaseModel):
     application_deadline: Optional[datetime] = None
     is_active: bool = True
     work_mode: Optional[WorkMode] = None
-    screening_questions: list["ScreeningQuestion"] = Field(default_factory=list, max_length=10)
+    screening_questions: list["ScreeningQuestion"] = Field(default_factory=list, max_length=MAX_QUESTIONS)
 
     @model_validator(mode="after")
     def _salary_range(self):
@@ -90,13 +98,14 @@ class JobUpdate(BaseModel):
     application_deadline: Optional[datetime] = None
     is_active: Optional[bool] = None
     work_mode: Optional[WorkMode] = None
-    screening_questions: Optional[list[ScreeningQuestion]] = Field(default=None, max_length=10)
+    screening_questions: Optional[list[ScreeningQuestion]] = Field(default=None, max_length=MAX_QUESTIONS)
 
 
 class ApplicationCreate(BaseModel):
     resume_id: Optional[str] = None
     cover_letter: Optional[str] = Field(default=None, max_length=5000)
-    answers: dict[str, str] = Field(default_factory=dict)
+    # question id -> text, a list of picked options (multiple choice) or an uploaded file id (file questions)
+    answers: dict[str, Union[str, list[str]]] = Field(default_factory=dict)
 
 
 class ApplicationStatusUpdate(BaseModel):

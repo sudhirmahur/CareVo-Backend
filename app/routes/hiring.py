@@ -23,20 +23,23 @@ from app.database import (
     job_views_collection,
     jobs_collection,
     offer_templates_collection,
+    offer_assets_collection,
     offers_collection,
     team_members_collection,
     users_collection,
 )
 from app.dependencies.auth import require_recruiter
 from app.routes.recruiter import _app_scope, _own_job, my_company
-from app.services import simplepdf
+from app.schemas.common import HttpUrl, MediaUrl
+from app.services import simplepdf, storage
 from app.services.applications import shape_applications
 from app.services.email import send_template
 from app.services.notify import notify
-from app.services.offers import DEFAULT_BODY, DEFAULT_TERMS, letter_paragraphs, offer_out
+from app.services.offers import DEFAULT_BODY, DEFAULT_TERMS, STYLES, letter_paragraphs, offer_out, render_pdf, styles_out
 from app.utils import get_or_404, now, oid, ser
 
 router = APIRouter()
+files_router = APIRouter()
 
 
 def _csv(rows: list[list], header: list[str]) -> Response:
@@ -689,6 +692,18 @@ class OfferIn(BaseModel):
     expires_in_days: int = Field(default=7, ge=1, le=60)
     template_id: Optional[str] = None
     terms: Optional[str] = Field(default=None, max_length=3000)
+    template_style: Literal["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient"] = "modern_corporate"
+    probation_months: Optional[int] = Field(default=None, ge=0, le=24)
+    working_hours: Optional[str] = Field(default=None, max_length=120)
+    notice_period: Optional[str] = Field(default=None, max_length=60)
+    company_address: Optional[str] = Field(default=None, max_length=200)
+    company_website: HttpUrl = None
+    company_email: Optional[str] = Field(default=None, max_length=120)
+    company_phone: Optional[str] = Field(default=None, max_length=40)
+    company_logo_url: MediaUrl = None
+    signatory_name: Optional[str] = Field(default=None, max_length=100)
+    signatory_title: Optional[str] = Field(default=None, max_length=100)
+    signature_asset_id: Optional[str] = None
 
 
 class OfferUpdate(BaseModel):
@@ -697,6 +712,18 @@ class OfferUpdate(BaseModel):
     joining_date: Optional[datetime] = None
     terms: Optional[str] = Field(default=None, max_length=3000)
     body: Optional[str] = Field(default=None, min_length=20, max_length=6000)
+    template_style: Optional[Literal["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient"]] = None
+    probation_months: Optional[int] = Field(default=None, ge=0, le=24)
+    working_hours: Optional[str] = Field(default=None, max_length=120)
+    notice_period: Optional[str] = Field(default=None, max_length=60)
+    company_address: Optional[str] = Field(default=None, max_length=200)
+    company_website: HttpUrl = None
+    company_email: Optional[str] = Field(default=None, max_length=120)
+    company_phone: Optional[str] = Field(default=None, max_length=40)
+    company_logo_url: MediaUrl = None
+    signatory_name: Optional[str] = Field(default=None, max_length=100)
+    signatory_title: Optional[str] = Field(default=None, max_length=100)
+    signature_asset_id: Optional[str] = None
 
 
 def _tpl_scope(user) -> dict:
@@ -746,6 +773,62 @@ def offers_list(status: Optional[str] = None, user=Depends(require_recruiter)):
     return {"items": [offer_out(r) for r in rows], "total": len(rows), "counts": counts}
 
 
+def _branding(user, data) -> dict:
+    """Style, letterhead and signature fields; blanks are filled from the recruiter's company profile."""
+    co = my_company(user) or {}
+    v = data.model_dump(exclude_unset=True)
+    sig = v.get("signature_asset_id")
+    if sig:
+        try:
+            asset = offer_assets_collection.find_one({"_id": oid(sig, "signature"), **({} if user["role"] == "admin" else {"recruiter_id": user["_id"]})})
+        except HTTPException:
+            asset = None
+        if not asset:
+            raise HTTPException(422, "Signature image not found. Upload it again.")
+        v["signature_asset_id"] = asset["_id"]
+    out = {k: v[k] for k in ("template_style", "probation_months", "working_hours", "notice_period", "company_address", "company_website", "company_email", "company_phone", "company_logo_url", "signatory_name", "signatory_title", "signature_asset_id") if k in v}
+    if "company_logo_url" not in v and co.get("logo_url"):
+        out["company_logo_url"] = co["logo_url"]
+    if "company_website" not in v and co.get("website"):
+        out["company_website"] = co["website"]
+    if "company_address" not in v and co.get("location"):
+        out["company_address"] = co["location"]
+    out.setdefault("template_style", "modern_corporate")
+    out.setdefault("signatory_name", user["name"])
+    return out
+
+
+@router.get("/offer-styles")
+def offer_styles(user=Depends(require_recruiter)):
+    return {"items": styles_out()}
+
+
+SIGNATURE_MAX_BYTES = 400 * 1024
+SIGNATURE_MAGIC = {".png": b"\x89PNG", ".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff"}
+
+
+@router.post("/offer-assets/signature", status_code=201)
+async def upload_signature(file: UploadFile = File(...), user=Depends(require_recruiter)):
+    """Digital signature image for offer letters. Stored privately; only the PDF builder reads it."""
+    import os
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in SIGNATURE_MAGIC:
+        raise HTTPException(400, "Signature must be a PNG or JPG image")
+    content = await file.read(SIGNATURE_MAX_BYTES + 1)
+    if len(content) > SIGNATURE_MAX_BYTES:
+        raise HTTPException(400, "Signature image is too large (max 400 KB)")
+    if not content.startswith(SIGNATURE_MAGIC[ext]):
+        raise HTTPException(400, "The file is not a valid PNG/JPG image")
+    saved = storage.store_private(content, ext, "signatures")
+    doc = {"recruiter_id": user["_id"], "kind": "signature", "storage": saved["provider"], "storage_ref": saved["ref"], "size": len(content), "created_at": now()}
+    doc["_id"] = offer_assets_collection.insert_one(dict(doc)).inserted_id
+    import base64
+
+    mime = "image/png" if ext == ".png" else "image/jpeg"
+    return {"id": str(doc["_id"]), "data_url": f"data:{mime};base64,{base64.b64encode(content).decode()}"}
+
+
 @router.post("/offers", status_code=201)
 def offer_create(data: OfferIn, user=Depends(require_recruiter)):
     app = _scope_app(user, data.application_id)
@@ -775,6 +858,7 @@ def offer_create(data: OfferIn, user=Depends(require_recruiter)):
         "company_name": app.get("company_name") or _company_name(user),
         "recruiter_name": user["name"],
         "expires_days": data.expires_in_days,
+        **_branding(user, data),
         "status": "draft",
         "history": [{"status": "draft", "at": ts}],
         "created_at": ts,
@@ -797,6 +881,8 @@ def offer_update(offer_id: str, data: OfferUpdate, user=Depends(require_recruite
     values = data.model_dump(exclude_unset=True)
     if not values:
         raise HTTPException(400, "No data provided")
+    if "signature_asset_id" in values:
+        values["signature_asset_id"] = _branding(user, data)["signature_asset_id"] if values["signature_asset_id"] else None
     values["updated_at"] = now()
     offers_collection.update_one({"_id": o["_id"]}, {"$set": values})
     return offer_out(offers_collection.find_one({"_id": o["_id"]}), with_letter=True)
@@ -837,5 +923,52 @@ def offer_withdraw(offer_id: str, user=Depends(require_recruiter)):
 @router.get("/offers/{offer_id}/pdf")
 def offer_pdf(offer_id: str, user=Depends(require_recruiter)):
     o = _own_offer(user, offer_id)
-    title, paras = letter_paragraphs(o)
-    return Response(simplepdf.build(title, paras, footer=o["company_name"]), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=offer-{str(o['_id'])[-6:]}.pdf"})
+    return Response(render_pdf(o), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=offer-{str(o['_id'])[-6:]}.pdf"})
+
+
+# ======================================================================= files uploaded as screening answers
+ANSWER_LINK_SECONDS = 300
+
+
+def _answer_sig(file_id: str, exp: int) -> str:
+    import hashlib
+    import hmac
+
+    from app.config import JWT_SECRET
+
+    return hmac.new(JWT_SECRET.encode(), f"answer:{file_id}:{exp}".encode(), hashlib.sha256).hexdigest()
+
+
+@router.get("/answer-files/{file_id}/link")
+def answer_file_link(file_id: str, user=Depends(require_recruiter)):
+    """Short-lived signed link. Only the recruiter who owns the job (or an admin) can ask for it."""
+    import time
+
+    from app.database import answer_files_collection
+
+    f = get_or_404(answer_files_collection, oid(file_id, "file ID"), "File")
+    job = jobs_collection.find_one({"_id": f["job_id"]}) or {}
+    if user["role"] != "admin" and job.get("recruiter_id") != user["_id"]:
+        raise HTTPException(404, "File not found")
+    exp = int(time.time()) + ANSWER_LINK_SECONDS
+    return {"url": f"/api/files/answer/{file_id}?exp={exp}&sig={_answer_sig(file_id, exp)}", "expires_in": ANSWER_LINK_SECONDS}
+
+
+@files_router.get("/answer/{file_id}")
+def answer_file(file_id: str, exp: int = Query(...), sig: str = Query(..., max_length=128)):
+    import hmac
+    import os
+    import time
+
+    from fastapi.responses import Response
+
+    from app.database import answer_files_collection
+    from app.services import storage
+
+    if exp < time.time() or not hmac.compare_digest(sig, _answer_sig(file_id, exp)):
+        raise HTTPException(403, "This download link is invalid or has expired")
+    f = get_or_404(answer_files_collection, oid(file_id, "file ID"), "File")
+    data = storage.read_private(f.get("storage"), f.get("storage_ref"))
+    name = "".join(c for c in f["name"] if c.isalnum() or c in " ._-")[:100] or "file"
+    mime = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+    return Response(data, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

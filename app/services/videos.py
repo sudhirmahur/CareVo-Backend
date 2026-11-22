@@ -7,6 +7,7 @@ from app.database import (
     video_likes_collection,
     video_saves_collection,
 )
+from app.services import storage
 from app.utils import ser
 
 
@@ -22,6 +23,8 @@ def shape_videos(videos: list, user: Optional[dict] = None) -> list:
     out = []
     for v in videos:
         item = ser(v)
+        item["playback_url"] = storage.playback_url(v.get("video_url"))
+        item["poster_url"] = v.get("thumbnail_url") or storage.poster_url(v.get("video_url"))
         a = authors.get(v.get("user_id"))
         c = companies.get(v.get("company_id"))
         item["author"] = {"id": str(a["_id"]), "name": a["name"], "role": a["role"], "profile_image": a.get("profile_image")} if a else None

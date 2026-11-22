@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import uuid
@@ -8,7 +9,7 @@ import hmac
 import time
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.config import JWT_SECRET, MAX_RESUME_MB, UPLOAD_DIR
 from app.database import (
@@ -18,6 +19,7 @@ from app.database import (
     user_profiles_collection,
 )
 from app.dependencies.auth import get_current_user
+from app.services import storage
 from app.utils import get_or_404, now, oid, ser
 
 router = APIRouter()
@@ -27,6 +29,23 @@ RESUME_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx"}
 MAGIC = {".pdf": b"%PDF", ".docx": b"PK", ".doc": b"\xd0\xcf\x11\xe0"}
+
+
+MIME_BY_EXT = {".pdf": "application/pdf", ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+
+
+def _read_file(resume: dict) -> bytes:
+    """Bytes of a stored resume, from Cloudinary or disk (older rows only have file_url)."""
+    if resume.get("storage_ref"):
+        return storage.read_private(resume.get("storage"), resume["storage_ref"])
+    return storage.read_private("local", "resumes/" + os.path.basename(resume.get("file_url", "")))
+
+
+def _delete_file(resume: dict) -> None:
+    if resume.get("storage_ref"):
+        storage.delete_private(resume.get("storage"), resume["storage_ref"])
+    else:
+        storage.delete_private("local", "resumes/" + os.path.basename(resume.get("file_url", "")))
 
 
 def _shape(resume: dict) -> dict:
@@ -49,15 +68,17 @@ async def upload_resume(file: UploadFile = File(...), user=Depends(get_current_u
     if not content.startswith(MAGIC[extension]):
         raise HTTPException(400, f"The file content does not look like a valid {extension.upper().strip('.')} file")
 
-    filename = f"{uuid.uuid4()}{extension}"
-    with open(RESUME_DIR / filename, "wb") as buffer:
-        buffer.write(content)
+    # Cloudinary (private, authenticated) in production; local disk only when Cloudinary is not configured
+    saved = storage.store_private(content, extension, "resumes")
+    filename = os.path.basename(saved["ref"])
 
     first = resumes_collection.count_documents({"user_id": user["_id"]}) == 0
     ts = now()
     doc = {
         "user_id": user["_id"],
         "file_url": f"/uploads/resumes/{filename}",
+        "storage": saved["provider"],
+        "storage_ref": saved["ref"],
         "original_name": original[:150],
         "parsed_data": {},
         "ai_score": None,
@@ -92,9 +113,7 @@ def get_resume(resume_id: str, user=Depends(get_current_user)):
 def delete_resume(resume_id: str, user=Depends(get_current_user)):
     resume = get_or_404(resumes_collection, oid(resume_id, "resume ID"), "Resume", {"user_id": user["_id"]})
     resumes_collection.delete_one({"_id": resume["_id"]})
-    path = RESUME_DIR / os.path.basename(resume.get("file_url", ""))
-    if path.is_file():
-        path.unlink()
+    _delete_file(resume)
     # keep applications intact but detach the file
     applications_collection.update_many({"resume_id": resume["_id"]}, {"$set": {"resume_id": None}})
     if resume.get("is_default"):
@@ -124,7 +143,7 @@ def extract_text(path, extension: str) -> str:
         if extension == ".pdf":
             from pypdf import PdfReader
 
-            return "\n".join((p.extract_text() or "") for p in PdfReader(str(path)).pages)
+            return "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
         if extension == ".docx":
             with zipfile.ZipFile(path) as z:
                 xml = z.read("word/document.xml").decode("utf8", "ignore")
@@ -216,10 +235,12 @@ def analyze_text(text: str, known_skills: list, profile_skills: list) -> dict:
 @router.post("/{resume_id}/analyze")
 def analyze_resume(resume_id: str, user=Depends(get_current_user)):
     resume = get_or_404(resumes_collection, oid(resume_id, "resume ID"), "Resume", {"user_id": user["_id"]})
-    path = RESUME_DIR / os.path.basename(resume.get("file_url", ""))
-    if not path.is_file():
+    ext = os.path.splitext(resume.get("storage_ref") or resume.get("file_url", ""))[1].lower()
+    try:
+        raw = _read_file(resume)
+    except HTTPException:
         raise HTTPException(404, "Resume file is missing on the server")
-    text = extract_text(path, path.suffix.lower())
+    text = extract_text(io.BytesIO(raw), ext)
     if not text.strip():
         raise HTTPException(422, "Could not read any text from this file (scanned image or unsupported .doc). Upload a text PDF or DOCX.")
     known = [s["name"] for s in skills_collection.find({}, {"name": 1})]
@@ -259,7 +280,8 @@ def resume_file(resume_id: str, exp: int = Query(...), sig: str = Query(..., max
     if exp < time.time() or not hmac.compare_digest(sig, _sig(resume_id, exp)):
         raise HTTPException(403, "This download link is invalid or has expired")
     resume = get_or_404(resumes_collection, oid(resume_id, "resume ID"), "Resume")
-    path = RESUME_DIR / os.path.basename(resume.get("file_url", ""))
-    if not path.is_file():
-        raise HTTPException(404, "File not found")
-    return FileResponse(path, filename=resume.get("original_name") or path.name, headers={"Cache-Control": "private, no-store"})
+    data = _read_file(resume)
+    name = "".join(c for c in (resume.get("original_name") or "resume") if c.isalnum() or c in " ._-")[:100] or "resume"
+    ext = os.path.splitext(name)[1].lower()
+    return Response(data, media_type=MIME_BY_EXT.get(ext, "application/octet-stream"),
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

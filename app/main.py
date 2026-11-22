@@ -47,6 +47,9 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from app.services import storage
+    if IS_PRODUCTION and not storage.cloudinary_enabled():
+        print("WARNING: ENV=production but Cloudinary is not configured - uploads (resumes, videos, images) are kept on the server disk and are lost on every redeploy. Set CLOUDINARY_URL.")
     ensure_indexes()
     run_startup_seed()
     task = None
@@ -147,6 +150,7 @@ app.include_router(twofa.router, prefix=f"{API}/auth/2fa", tags=["Two-factor"])
 app.include_router(account.router, prefix=f"{API}/account", tags=["Account"])
 app.include_router(career.router, prefix=API, tags=["Career"])
 app.include_router(career.files_router, prefix=f"{API}/files", tags=["Files"])
+app.include_router(hiring.files_router, prefix=f"{API}/files", tags=["Files"])
 app.include_router(admin_ops.me_router, prefix=f"{API}/admin", tags=["Admin - ops"])
 app.include_router(admin_ops.router, prefix=f"{API}/admin", tags=["Admin - ops"])
 app.include_router(admin_events.router, prefix=f"{API}/admin", tags=["Admin - events"])

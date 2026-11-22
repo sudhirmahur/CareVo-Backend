@@ -1,3 +1,5 @@
+import re
+from urllib.parse import urlsplit
 from typing import Annotated, Optional
 
 from pydantic import AfterValidator, StringConstraints
@@ -12,6 +14,8 @@ Email = Annotated[
         pattern=r"^[A-Za-z0-9._%+\-']+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}$",
     ),
 ]
+import re
+from urllib.parse import urlsplit
 
 
 def _http_url(value: Optional[str]) -> Optional[str]:
@@ -22,8 +26,16 @@ def _http_url(value: Optional[str]) -> Optional[str]:
         return None
     if not (value.lower().startswith("http://") or value.lower().startswith("https://")):
         raise ValueError("URL must start with http:// or https://")
-    if len(value) > 2048 or " " in value:
+    if len(value) > 2048 or any(c in value for c in " \r\n\t<>\"'`\\"):
         raise ValueError("Invalid URL")
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname or ""
+        parts.port  # noqa: B018 - raises ValueError for a bad port
+    except ValueError:
+        raise ValueError("Invalid URL")
+    if not host or not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9\-\.]*[A-Za-z0-9])?|\[[0-9A-Fa-f:\.]+\]", host) or ".." in host:
+        raise ValueError("Enter a full link with a website name, e.g. https://company.com/careers")
     return value
 
 
