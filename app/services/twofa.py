@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 
 from app import config
 from app.database import challenges_collection, users_collection
-from app.services import totp
+from app.services import secretbox, totp
 from app.services.auth import hash_token
 from app.services.email import send_template
 from app.services.sessions import issue_token, log_activity
@@ -71,7 +71,7 @@ def check_code(ch: dict, user: dict, code: str) -> bool:
     if ch["method"] == "email":
         ok = hmac.compare_digest(ch["code_hash"], hash_token((code or "").strip()))
     else:
-        ok = totp.verify((user.get("twofa") or {}).get("secret", ""), code)
+        ok = totp.verify(secretbox.reveal((user.get("twofa") or {}).get("secret", "")), code)
     if ok:
         challenges_collection.update_one({"_id": ch["_id"]}, {"$set": {"used": True}})
     return ok

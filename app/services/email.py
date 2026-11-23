@@ -24,6 +24,7 @@ DEFAULT_TEMPLATES = [
     ("job_alert", "Job Alert", "{{status}} new job(s) match your alerts", "Hi {{name}},\n\nNew jobs for you: {{details}}\nOpen CareVo to see them: {{app_url}}/jobs"),
     ("referral_invite", "Referral Invitation", "{{name}} invited you to CareVo", "Hi,\n\n{{name}} thinks CareVo can help your career. Join here: {{link}}"),
     ("offer_letter", "Offer Letter Notification", "You have a job offer from {{company}}", "Hi {{name}},\n\n{{company}} sent you an offer for {{designation}}. Open CareVo to review and respond: {{link}}"),
+    ("login_alert", "New sign-in alert", "New sign-in to your CareVo account", "Hi {{name}},\n\nYour account was just signed in from a new device: {{device}} (IP {{ip}}) on {{when}}.\n\nIf this was you, no action is needed. If not, change your password now and end other sessions: {{app_url}}/account"),
     ("team_invite", "Team Invitation", "{{company}} invited you to join their hiring team", "Hi {{name}},\n\n{{company}} added you to their CareVo hiring team as {{role}}."),
     ("recruiter_message", "Recruiter Message", "{{subject}}", "Hi {{name}},\n\n{{message}}\n\n- {{company}}"),
 ]
@@ -44,12 +45,15 @@ def placeholders(text: str) -> list[str]:
     return sorted(set(PLACEHOLDER.findall(text or "")))
 
 
-def _smtp_send(to: str, subject: str, body: str, outbox_id) -> None:
+def _smtp_send(to: str, subject: str, body: str, outbox_id, attachments=None) -> None:
     try:
         msg = EmailMessage()
         msg["From"], msg["To"], msg["Subject"] = config.SMTP_FROM, to, subject
         msg.set_content(body)
         msg.add_alternative("<pre style='font-family:inherit;white-space:pre-wrap'>" + escape(body) + "</pre>", subtype="html")
+        for name, data, mime in attachments or []:
+            maintype, _, subtype = (mime or "application/octet-stream").partition("/")
+            msg.add_attachment(data, maintype=maintype, subtype=subtype or "octet-stream", filename=name)
         with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15) as s:
             if config.SMTP_TLS:
                 s.starttls()
@@ -61,7 +65,7 @@ def _smtp_send(to: str, subject: str, body: str, outbox_id) -> None:
         email_outbox_collection.update_one({"_id": outbox_id}, {"$set": {"status": "failed", "error": str(exc)[:200]}})
 
 
-def send_template(key: str, to: str, ctx: dict, user_id=None, force: bool = False) -> Optional[dict]:
+def send_template(key: str, to: str, ctx: dict, user_id=None, force: bool = False, attachments=None) -> Optional[dict]:
     """Render the template and send/record it. Returns the outbox row (None when the template is disabled)."""
     tpl = email_templates_collection.find_one({"key": key})
     if not tpl or (not tpl.get("enabled", True) and not force):
@@ -70,13 +74,13 @@ def send_template(key: str, to: str, ctx: dict, user_id=None, force: bool = Fals
         u = users_collection.find_one({"_id": user_id}, {"notification_prefs": 1, "privacy": 1})
         prefs = ((u or {}).get("notification_prefs") or {}).get("email_enabled")
         marketing_only = key in ("promo",)
-        if prefs is False and key not in ("otp", "password_reset", "verification"):
+        if prefs is False and key not in ("otp", "password_reset", "verification", "login_alert"):
             return None
         if marketing_only and ((u or {}).get("privacy") or {}).get("marketing_emails") is False:
             return None
     full = {"app_url": config.PUBLIC_APP_URL, **ctx}
-    row = {"to": to, "template": key, "subject": render(tpl["subject"], full)[:200], "body": render(tpl["body"], full), "status": "queued" if config.SMTP_HOST else "recorded", "user_id": user_id, "created_at": now()}
+    row = {"to": to, "template": key, "subject": render(tpl["subject"], full)[:200], "body": render(tpl["body"], full), "status": "queued" if config.SMTP_HOST else "recorded", "user_id": user_id, "attachments": [a[0] for a in attachments or []], "created_at": now()}
     row["_id"] = email_outbox_collection.insert_one(dict(row)).inserted_id
     if config.SMTP_HOST:
-        threading.Thread(target=_smtp_send, args=(to, row["subject"], row["body"], row["_id"]), daemon=True).start()
+        threading.Thread(target=_smtp_send, args=(to, row["subject"], row["body"], row["_id"], attachments), daemon=True).start()
     return row

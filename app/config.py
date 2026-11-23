@@ -83,6 +83,10 @@ SMTP_TLS = _bool("SMTP_TLS", True)
 SCHEDULER_ENABLED = _bool("SCHEDULER_ENABLED", True)  # background digests / reminders / scheduled backups
 # Dev/test only: return one-time codes in the API response (there is no mail provider in the sandbox).
 EXPOSE_OTP = _bool("EXPOSE_OTP", False)
+# Separate key for encrypting stored secrets (2FA seeds). Falls back to JWT_SECRET when empty.
+DATA_ENCRYPTION_KEY = os.getenv("DATA_ENCRYPTION_KEY", "").strip()
+# Optional error monitoring (needs `pip install sentry-sdk`). Nothing is sent unless SENTRY_DSN is set.
+SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173").rstrip("/")
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", str(BASE_DIR / "backups")))
 

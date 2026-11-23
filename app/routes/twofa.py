@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from app.database import challenges_collection, users_collection
 from app.dependencies.auth import get_current_user
 from app.routes.auth import public_user
-from app.services import totp
+from app.services import secretbox, totp
 from app.services.auth import verify_password
 from app.services.notify import notify
 from app.services.sessions import log_activity
@@ -46,18 +46,18 @@ def totp_setup(user=Depends(get_current_user)):
     if enabled(user):
         raise HTTPException(400, "Two-factor authentication is already on. Turn it off first to change the method.")
     secret = totp.new_secret()
-    users_collection.update_one({"_id": user["_id"]}, {"$set": {"twofa": {"enabled": False, "pending_secret": secret}}})
+    users_collection.update_one({"_id": user["_id"]}, {"$set": {"twofa": {"enabled": False, "pending_secret": secretbox.seal(secret)}}})
     return {"secret": secret, "otpauth_uri": totp.uri(secret, user["email"])}
 
 
 @router.post("/totp/enable")
 def totp_enable(data: CodeIn, request: Request, user=Depends(get_current_user)):
-    secret = (user.get("twofa") or {}).get("pending_secret")
+    secret = secretbox.reveal((user.get("twofa") or {}).get("pending_secret", ""))
     if not secret:
         raise HTTPException(400, "Start the setup first")
     if not totp.verify(secret, data.code):
         raise HTTPException(400, "That code is not correct. Check the time on your phone and try again.")
-    users_collection.update_one({"_id": user["_id"]}, {"$set": {"twofa": {"enabled": True, "method": "totp", "secret": secret, "enabled_at": now()}}})
+    users_collection.update_one({"_id": user["_id"]}, {"$set": {"twofa": {"enabled": True, "method": "totp", "secret": secretbox.seal(secret), "enabled_at": now()}}})
     log_activity(user["_id"], "2fa_enabled", request, "authenticator app")
     notify(user["_id"], "Two-factor authentication is on", "Sign-ins now need a code from your authenticator app.", "security")
     return {"enabled": True, "method": "totp"}

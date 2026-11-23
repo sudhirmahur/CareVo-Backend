@@ -35,10 +35,31 @@ def log_activity(user_id, kind: str, request: Optional[Request] = None, detail: 
         pass
 
 
+def _alert_if_new_device(user: dict, device: str, ip: str, kind: str) -> None:
+    """E-mail + in-app alert when an existing account signs in from a browser/OS it has not used before."""
+    if kind == "register":
+        return
+    try:
+        if sessions_collection.count_documents({"user_id": user["_id"]}) == 0:
+            return  # first ever sign-in: nothing to compare with
+        if sessions_collection.find_one({"user_id": user["_id"], "device": device}):
+            return
+        from app.services.email import send_template
+        from app.services.notify import notify
+
+        when = now().strftime("%d %b %Y, %H:%M UTC")
+        send_template("login_alert", user["email"], {"name": user.get("name", ""), "device": device, "ip": ip or "unknown", "when": when}, user["_id"])
+        notify(user["_id"], "New sign-in to your account", f"{device} signed in on {when}. If this was not you, change your password and end other sessions.", "security")
+    except Exception:  # pragma: no cover - an alert must never block a login
+        pass
+
+
 def issue_token(user: dict, request: Optional[Request] = None, kind: str = "login") -> str:
     """Create a revocable session + its JWT, and record the sign-in."""
     sid = secrets.token_hex(12)
     ts = now()
+    device = describe_device(request.headers.get("user-agent", "")) if request else "Unknown"
+    _alert_if_new_device(user, device, _ip(request), kind)
     sessions_collection.insert_one(
         {"user_id": user["_id"], "sid": sid, "ip": _ip(request), "device": describe_device(request.headers.get("user-agent", "")) if request else "Unknown", "created_at": ts, "last_seen": ts, "revoked": False}
     )

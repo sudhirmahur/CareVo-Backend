@@ -1,4 +1,4 @@
-"""Offer letter templates: 5 styles, branding, signature, A4 PDF with page numbers, access control."""
+"""Offer letter templates: 7 styles, branding, signature, A4 PDF with page numbers, access control."""
 import io
 import struct
 import zlib
@@ -8,7 +8,7 @@ from pypdf import PdfReader
 
 from tests.conftest import JOB
 
-STYLES = ["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient"]
+STYLES = ["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient", "vibrant_swoosh", "playful_circles"]
 
 
 def _png(w=60, h=24, rgb=(20, 30, 120)):
@@ -33,11 +33,11 @@ def _make(rec, app_id, **extra):
     return r.json()
 
 
-def test_five_styles_are_listed(offer_ctx):
+def test_seven_styles_are_listed(offer_ctx):
     rec = offer_ctx[0]
     items = rec.get("/api/recruiter/offer-styles").json()["items"]
     assert [s["key"] for s in items] == STYLES
-    assert {s["name"] for s in items} == {"Modern Corporate", "Minimal Professional", "Premium Corporate", "Classic Formal", "Modern Gradient"}
+    assert {s["name"] for s in items} == {"Modern Corporate", "Minimal Professional", "Premium Corporate", "Classic Formal", "Modern Gradient", "Vibrant Swoosh", "Playful Circles"}
 
 
 @pytest.mark.parametrize("style", STYLES)
@@ -54,7 +54,7 @@ def test_every_style_renders_a_professional_a4_pdf(offer_ctx, style):
     assert round(float(page.mediabox.width)) == 595 and round(float(page.mediabox.height)) == 842, "A4"
     text = "\n".join(p.extract_text() for p in pdf.pages)
     for needle in ["Offer of Employment", "Bunty Kumar", "Full Stack Developer", "15,00,000", "15 December 2026", "3 months", "Mon-Fri", "30 days", "Asha Verma", "Head of People",
-                   "1. Background verification", "2. Confidentiality", "Candidate acceptance", f"Page 1 of {len(pdf.pages)}"]:
+                   "Candidate acceptance", f"Page 1 of {len(pdf.pages)}"] + (["Background verification", "Confidentiality applies"] if style == "vibrant_swoosh" else ["1. Background verification", "2. Confidentiality"]):
         assert needle in text, f"{style}: missing {needle!r}"
 
 
@@ -156,3 +156,74 @@ def test_admin_can_list_and_download_every_offer_but_users_cannot(offer_ctx, adm
     assert admin.get("/api/admin/offers", params={"q": "bunty"}).json()["total"] == 1
     assert admin.get(f"/api/admin/offers/{o['id']}/pdf").content.startswith(b"%PDF")
     assert cand.get("/api/admin/offers").status_code == 403 and rec.get("/api/admin/offers").status_code == 403
+
+
+def test_new_swoosh_and_circles_designs_have_their_own_layout(offer_ctx):
+    from pypdf import PdfReader
+    rec, _, _, app_id = offer_ctx
+    o = _make(rec, app_id, probation_months=6, working_hours="Mon-Fri, 9-6", notice_period="60 days", signatory_name="Asha Verma")
+    for style, needle in (("vibrant_swoosh", "Annual Compensation"), ("playful_circles", "Terms and conditions")):
+        u = rec.put(f"/api/recruiter/offers/{o['id']}", json={"template_style": style})
+        assert u.status_code == 200 and u.json()["template_style"] == style and u.json()["style"]["name"] in ("Vibrant Swoosh", "Playful Circles")
+        r = rec.get(f"/api/recruiter/offers/{o['id']}/pdf")
+        assert r.status_code == 200 and r.content[:5] == b"%PDF-"
+        text = "".join(pg.extract_text() for pg in PdfReader(io.BytesIO(r.content)).pages)
+        for t in (needle, "Offer of Employment", "Full Stack Developer", "Asha Verma", "Page 1 of"):
+            assert t in text, (style, t)
+    # swoosh turns probation/hours/notice into numbered terms, like the sample design
+    rec.put(f"/api/recruiter/offers/{o['id']}", json={"template_style": "vibrant_swoosh"})
+    text = PdfReader(io.BytesIO(rec.get(f"/api/recruiter/offers/{o['id']}/pdf").content)).pages[0].extract_text()
+    assert "Probation period of 6 months" in text and "Notice period: 60 days" in text and "respond to this offer on CareVo" in text
+
+
+def test_unknown_style_is_rejected(offer_ctx):
+    rec, _, _, app_id = offer_ctx
+    r = rec.post("/api/recruiter/offers", json={"application_id": app_id, "designation": "X", "salary": 1, "joining_date": "2026-12-15T00:00:00Z", "template_style": "neon"})
+    assert r.status_code == 422
+
+
+def test_swoosh_long_letter_paginates_with_decorations_on_each_page(offer_ctx):
+    from pypdf import PdfReader
+    rec, _, _, app_id = offer_ctx
+    terms = "\n".join(f"Clause {i}: " + "The employee shall comply with company policy. " * 6 for i in range(1, 16))
+    o = _make(rec, app_id, template_style="vibrant_swoosh", terms=terms[:2990])
+    pages = PdfReader(io.BytesIO(rec.get(f"/api/recruiter/offers/{o['id']}/pdf").content)).pages
+    assert len(pages) >= 2
+    for i, pg in enumerate(pages, 1):
+        assert f"Page {i} of {len(pages)}" in pg.extract_text()
+
+
+def test_sending_an_offer_emails_the_pdf_to_the_candidate(offer_ctx):
+    rec, _, cand, app_id = offer_ctx
+    from app.database import email_outbox_collection
+
+    o = _make(rec, app_id, template_style="vibrant_swoosh")
+    assert rec.post(f"/api/recruiter/offers/{o['id']}/send").status_code == 200
+    row = email_outbox_collection.find_one({"template": "offer_letter"})
+    assert row and row["attachments"] and row["attachments"][0].endswith(".pdf")
+    assert "/offers" in row["body"] and "{{" not in row["body"], "the link placeholder is filled"
+
+
+def test_smtp_message_carries_the_pdf_attachment(monkeypatch):
+    import email as email_pkg
+    from app import config
+    from app.database import email_outbox_collection
+    from app.services import email as mail
+
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def starttls(self): pass
+        def login(self, *a): pass
+        def send_message(self, msg): sent.append(msg)
+
+    monkeypatch.setattr(config, "SMTP_HOST", "smtp.test"); monkeypatch.setattr(mail.smtplib, "SMTP", FakeSMTP)
+    oid_ = email_outbox_collection.insert_one({"to": "a@b.c", "status": "queued"}).inserted_id
+    mail._smtp_send("a@b.c", "Offer", "Body", oid_, [("Offer.pdf", b"%PDF-1.4 test", "application/pdf")])
+    assert len(sent) == 1
+    parts = [p for p in sent[0].iter_attachments()]
+    assert parts and parts[0].get_filename() == "Offer.pdf" and parts[0].get_content_type() == "application/pdf" and parts[0].get_content() == b"%PDF-1.4 test"
+    assert email_outbox_collection.find_one({"_id": oid_})["status"] == "sent"

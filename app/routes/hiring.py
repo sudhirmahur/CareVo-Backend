@@ -31,6 +31,7 @@ from app.database import (
 from app.dependencies.auth import require_recruiter
 from app.routes.recruiter import _app_scope, _own_job, my_company
 from app.schemas.common import HttpUrl, MediaUrl
+from app.config import PUBLIC_APP_URL
 from app.services import simplepdf, storage
 from app.services.applications import shape_applications
 from app.services.email import send_template
@@ -692,7 +693,7 @@ class OfferIn(BaseModel):
     expires_in_days: int = Field(default=7, ge=1, le=60)
     template_id: Optional[str] = None
     terms: Optional[str] = Field(default=None, max_length=3000)
-    template_style: Literal["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient"] = "modern_corporate"
+    template_style: Literal["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient", "vibrant_swoosh", "playful_circles"] = "modern_corporate"
     probation_months: Optional[int] = Field(default=None, ge=0, le=24)
     working_hours: Optional[str] = Field(default=None, max_length=120)
     notice_period: Optional[str] = Field(default=None, max_length=60)
@@ -712,7 +713,7 @@ class OfferUpdate(BaseModel):
     joining_date: Optional[datetime] = None
     terms: Optional[str] = Field(default=None, max_length=3000)
     body: Optional[str] = Field(default=None, min_length=20, max_length=6000)
-    template_style: Optional[Literal["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient"]] = None
+    template_style: Optional[Literal["modern_corporate", "minimal_professional", "premium_corporate", "classic_formal", "modern_gradient", "vibrant_swoosh", "playful_circles"]] = None
     probation_months: Optional[int] = Field(default=None, ge=0, le=24)
     working_hours: Optional[str] = Field(default=None, max_length=120)
     notice_period: Optional[str] = Field(default=None, max_length=60)
@@ -903,7 +904,12 @@ def offer_send(offer_id: str, user=Depends(require_recruiter)):
     notify(o["candidate_id"], "You have a new job offer", f"{o['company_name']} sent you an offer for {o['designation']}.", "application", "/offers")
     cand = users_collection.find_one({"_id": o["candidate_id"]})
     if cand:
-        send_template("offer_letter", cand["email"], {"name": cand["name"], "company": o["company_name"], "designation": o["designation"]}, user_id=cand["_id"])
+        attach = []
+        try:  # the signed letter travels with the e-mail so the candidate has a copy even before logging in
+            attach.append((f"Offer-{o['company_name'][:30].replace(' ', '_')}.pdf", render_pdf(o), "application/pdf"))
+        except Exception:  # pragma: no cover - the e-mail must go out even if the PDF could not be built
+            pass
+        send_template("offer_letter", cand["email"], {"name": cand["name"], "company": o["company_name"], "designation": o["designation"], "link": f"{PUBLIC_APP_URL}/offers"}, user_id=cand["_id"], attachments=attach)
     applications_collection.update_one({"_id": o["application_id"]}, {"$set": {"stage": "offer", "updated_at": ts}})
     return offer_out(o, with_letter=True)
 

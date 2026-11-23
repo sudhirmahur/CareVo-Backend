@@ -7,3 +7,5 @@ python-multipart>=0.0.9
 python-dotenv>=1.0
 pypdf>=4.0
 reportlab>=4.0
+cryptography>=42.0
+# optional: pip install sentry-sdk   (error monitoring, only used when SENTRY_DSN is set)

@@ -32,6 +32,7 @@ from app.routes import (
     recruiter,
     recruiters,
     resumes,
+    seo,
     skills,
     social,
     support,
@@ -43,6 +44,25 @@ from app.routes import (
 from app.services.seed import run_startup_seed
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def init_error_monitoring() -> bool:
+    """Optional Sentry. Does nothing unless SENTRY_DSN is set; never sends personal data; never stops the app."""
+    from app import config as _c
+
+    if not _c.SENTRY_DSN:
+        return False
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(dsn=_c.SENTRY_DSN, send_default_pii=False, traces_sample_rate=0.0, environment=_c.ENV)
+        return True
+    except Exception as exc:  # sentry-sdk missing or bad DSN
+        print(f"WARNING: SENTRY_DSN is set but error monitoring could not start: {exc}")
+        return False
+
+
+init_error_monitoring()
 
 
 @asynccontextmanager
@@ -142,6 +162,8 @@ def health():
     return {"status": "ok"}
 app.include_router(media.router, prefix=f"{API}/media", tags=["Media"])
 app.include_router(public.router, prefix=f"{API}/public", tags=["Public"])
+app.include_router(seo.router, prefix=f"{API}/public", tags=["SEO"])
+app.include_router(seo.root_router, include_in_schema=False)
 app.include_router(recruiters.router, prefix=f"{API}/recruiters", tags=["Recruiters"])
 app.include_router(admin_content.router, prefix=f"{API}/admin", tags=["Admin - content"])
 app.include_router(learning.router, prefix=API, tags=["Learning"])

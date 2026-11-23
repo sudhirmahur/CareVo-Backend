@@ -24,6 +24,8 @@ STYLES = {
     "premium_corporate": {"name": "Premium Corporate", "description": "Deep navy letterhead with gold detailing and serif type.", "primary": "#0f172a", "accent": "#b8923a", "tint": "#faf6ec", "head": "premium", "serif": True},
     "classic_formal": {"name": "Classic Formal", "description": "Traditional centred letterhead with double rule and serif type.", "primary": "#1f2937", "accent": "#1f2937", "tint": "#f5f5f4", "head": "classic", "serif": True},
     "modern_gradient": {"name": "Modern Gradient", "description": "Vibrant gradient header with a friendly, contemporary feel.", "primary": "#6366f1", "accent": "#ec4899", "tint": "#f5f3ff", "head": "gradient", "serif": False},
+    "vibrant_swoosh": {"name": "Vibrant Swoosh", "description": "Bold orange-red curved corners, gradient title, summary cards and numbered terms.", "primary": "#e11d2e", "accent": "#f97316", "tint": "#fdecee", "head": "swoosh", "serif": False},
+    "playful_circles": {"name": "Playful Circles", "description": "Light, friendly letter with colourful circles in the corners.", "primary": "#0e7490", "accent": "#f97316", "tint": "#ecfeff", "head": "circles", "serif": False},
 }
 DEFAULT_STYLE = "modern_corporate"
 

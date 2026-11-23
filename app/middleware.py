@@ -1,4 +1,5 @@
 """Security middleware: per-IP rate limiting and hardening headers."""
+import re
 import time
 from collections import defaultdict, deque
 
@@ -19,6 +20,18 @@ RULES = [
     ("/api/media/upload", "POST", 30, 60),
     ("/api/payments/order", "POST", 10, 60),
     ("/api/payments/verify", "POST", 20, 60),
+    ("/api/auth/2fa/email/send", "POST", 5, 600),
+    ("/api/auth/2fa/verify", "POST", 15, 300),
+    ("/api/account/password", None, 10, 900),
+    ("/api/support/tickets", "POST", 10, 3600),
+    ("/api/feedback", "POST", 10, 3600),
+    ("/api/reports", "POST", 10, 3600),
+    ("/api/messages", "POST", 60, 300),
+    ("/api/me/referrals/invite", "POST", 20, 3600),
+    ("~^/api/jobs/[^/]+/apply$", "POST", 40, 3600),
+    ("~^/api/jobs/[^/]+/answer-file$", "POST", 30, 3600),
+    ("~^/api/videos/[^/]+/comments$", "POST", 30, 300),
+    ("~^/api/me/offers/[^/]+/respond$", "POST", 10, 3600),
     ("/api/", None, 600, 60),  # everything else, per IP
 ]
 
@@ -64,7 +77,8 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if config.RATE_LIMIT_ENABLED and path.startswith("/api/") and request.method != "OPTIONS":
             ip = client_ip(request)
             for prefix, method, limit, window in RULES:
-                if path.startswith(prefix) and (method is None or method == request.method):
+                hit = bool(re.search(prefix[1:], path)) if prefix.startswith("~") else path.startswith(prefix)
+                if hit and (method is None or method == request.method):
                     wait = limiter.check(f"{ip}|{prefix}|{method}", limit, window)
                     if wait:
                         return JSONResponse(

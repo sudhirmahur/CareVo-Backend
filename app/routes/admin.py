@@ -277,7 +277,7 @@ def list_companies(
 
 
 @router.patch("/companies/{company_id}")
-def moderate_company(company_id: str, body: dict):
+def moderate_company(company_id: str, body: dict, admin=Depends(require_admin)):
     c = get_or_404(companies_collection, oid(company_id, "company ID"), "Company")
     allowed = {}
     if "status" in body:
@@ -290,18 +290,20 @@ def moderate_company(company_id: str, body: dict):
         raise HTTPException(400, "Nothing to update")
     allowed["updated_at"] = now()
     companies_collection.update_one({"_id": c["_id"]}, {"$set": allowed})
+    audit(admin, "company.moderate", str(c["_id"]), ", ".join(f"{k}={v}" for k, v in allowed.items() if k != "updated_at"))
     if "status" in allowed and allowed["status"] != c.get("status"):
         notify(c["recruiter_id"], f"Company {allowed['status']}", f"Your company '{c['name']}' was {allowed['status']} by an admin.", "system", "/recruiter/company")
     return ser(companies_collection.find_one({"_id": c["_id"]}))
 
 
 @router.delete("/companies/{company_id}")
-def delete_company(company_id: str):
+def delete_company(company_id: str, admin=Depends(require_admin)):
     c = get_or_404(companies_collection, oid(company_id, "company ID"), "Company")
     for job in list(jobs_collection.find({"company_id": c["_id"]})):
         delete_job_cascade(job["_id"])
     followers_collection.delete_many({"following_id": c["_id"]})
     companies_collection.delete_one({"_id": c["_id"]})
+    audit(admin, "company.delete", str(c["_id"]), c.get("name"))
     return {"message": "Company and its jobs deleted"}
 
 
@@ -340,6 +342,7 @@ def create_job(data: JobIn, admin=Depends(require_admin)):
     doc = build_job_document(data, company, company["recruiter_id"], "approved")
     doc["_id"] = jobs_collection.insert_one(dict(doc)).inserted_id
     sync_job_skills(doc["_id"], doc["skills"])
+    audit(admin, "job.create", str(doc["_id"]), doc.get("title"))
     from app.routes.career import notify_followers_of_job
 
     notify_followers_of_job(doc)
@@ -352,17 +355,18 @@ def get_job(job_id: str):
 
 
 @router.put("/jobs/{job_id}")
-def update_job(job_id: str, data: JobUpdate):
+def update_job(job_id: str, data: JobUpdate, admin=Depends(require_admin)):
     job = get_or_404(jobs_collection, oid(job_id, "job ID"), "Job")
     values = apply_job_update(job, data)
     jobs_collection.update_one({"_id": job["_id"]}, {"$set": values})
+    audit(admin, "job.update", str(job["_id"]), ",".join(k for k in values if k != "updated_at"))
     if "skills" in values:
         sync_job_skills(job["_id"], values["skills"])
     return shape_jobs([jobs_collection.find_one({"_id": job["_id"]})])[0]
 
 
 @router.patch("/jobs/{job_id}/status")
-def set_job_status(job_id: str, data: AdminJobStatus):
+def set_job_status(job_id: str, data: AdminJobStatus, admin=Depends(require_admin)):
     job = get_or_404(jobs_collection, oid(job_id, "job ID"), "Job")
     values = {
         "status": data.status,
@@ -370,6 +374,7 @@ def set_job_status(job_id: str, data: AdminJobStatus):
         "updated_at": now(),
     }
     jobs_collection.update_one({"_id": job["_id"]}, {"$set": values})
+    audit(admin, "job.status", str(job["_id"]), f"{job.get('status')} -> {data.status}")
     if data.status == "approved" and job.get("status") != "approved":
         from app.routes.career import notify_followers_of_job
 
@@ -387,25 +392,28 @@ def set_job_status(job_id: str, data: AdminJobStatus):
 
 
 @router.patch("/jobs/{job_id}/feature")
-def toggle_feature(job_id: str):
+def toggle_feature(job_id: str, admin=Depends(require_admin)):
     job = get_or_404(jobs_collection, oid(job_id, "job ID"), "Job")
     new_state = not job.get("is_featured", False)
     jobs_collection.update_one({"_id": job["_id"]}, {"$set": {"is_featured": new_state, "updated_at": now()}})
+    audit(admin, "job.feature", str(job["_id"]), str(new_state))
     return {"is_featured": new_state}
 
 
 @router.patch("/jobs/{job_id}/toggle")
-def toggle_active(job_id: str):
+def toggle_active(job_id: str, admin=Depends(require_admin)):
     job = get_or_404(jobs_collection, oid(job_id, "job ID"), "Job")
     new_state = not job.get("is_active", True)
     jobs_collection.update_one({"_id": job["_id"]}, {"$set": {"is_active": new_state, "updated_at": now()}})
+    audit(admin, "job.toggle", str(job["_id"]), str(new_state))
     return {"is_active": new_state}
 
 
 @router.delete("/jobs/{job_id}")
-def delete_job(job_id: str):
+def delete_job(job_id: str, admin=Depends(require_admin)):
     job = get_or_404(jobs_collection, oid(job_id, "job ID"), "Job")
     delete_job_cascade(job["_id"])
+    audit(admin, "job.delete", str(job["_id"]), job.get("title"))
     return {"message": "Job deleted"}
 
 
@@ -434,24 +442,26 @@ def list_applications(
 
 
 @router.patch("/applications/{application_id}/status")
-def set_application_status(application_id: str, data: ApplicationStatusUpdate):
+def set_application_status(application_id: str, data: ApplicationStatusUpdate, admin=Depends(require_admin)):
     app = get_or_404(applications_collection, oid(application_id, "application ID"), "Application")
     ts = now()
     applications_collection.update_one(
         {"_id": app["_id"]},
         {"$set": {"status": data.status, "updated_at": ts}, "$push": {"status_history": {"status": data.status, "at": ts, "note": data.note or "Updated by admin"}}},
     )
+    audit(admin, "application.status", str(app["_id"]), f"{app['status']} -> {data.status}")
     if data.status != app["status"]:
         notify(app["user_id"], "Application update", f"Your application for {app.get('job_title')} is now '{data.status}'.", "application", "/applications")
     return {"message": "Status updated", "status": data.status}
 
 
 @router.delete("/applications/{application_id}")
-def delete_application(application_id: str):
+def delete_application(application_id: str, admin=Depends(require_admin)):
     app = get_or_404(applications_collection, oid(application_id, "application ID"), "Application")
     interviews_collection.delete_many({"application_id": app["_id"]})
     applications_collection.delete_one({"_id": app["_id"]})
     jobs_collection.update_one({"_id": app["job_id"], "applications_count": {"$gt": 0}}, {"$inc": {"applications_count": -1}})
+    audit(admin, "application.delete", str(app["_id"]))
     return {"message": "Application deleted"}
 
 
@@ -479,7 +489,7 @@ def list_videos(
 
 
 @router.patch("/videos/{video_id}/moderate")
-def moderate_video(video_id: str, body: dict):
+def moderate_video(video_id: str, body: dict, admin=Depends(require_admin)):
     v = get_or_404(videos_collection, oid(video_id, "video ID"), "Video")
     values = {}
     if "is_removed" in body:
@@ -490,12 +500,14 @@ def moderate_video(video_id: str, body: dict):
         raise HTTPException(400, "Nothing to update")
     values["updated_at"] = now()
     videos_collection.update_one({"_id": v["_id"]}, {"$set": values})
+    audit(admin, "video.moderate", str(v["_id"]), ", ".join(f"{k}={x}" for k, x in values.items() if k != "updated_at"))
     return shape_videos([videos_collection.find_one({"_id": v["_id"]})], None)[0]
 
 
 @router.delete("/videos/{video_id}")
-def delete_video(video_id: str):
+def delete_video(video_id: str, admin=Depends(require_admin)):
     delete_video_cascade(get_or_404(videos_collection, oid(video_id, "video ID"), "Video"))
+    audit(admin, "video.delete", video_id)
     return {"message": "Video deleted"}
 
 

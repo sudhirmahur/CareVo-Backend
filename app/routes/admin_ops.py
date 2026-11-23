@@ -218,12 +218,13 @@ def admin_offers(status: Optional[str] = None, q: Optional[str] = Query(None, ma
 
 
 @router.get("/offers/{offer_id}/pdf")
-def admin_offer_pdf(offer_id: str):
+def admin_offer_pdf(offer_id: str, admin=Depends(require_admin)):
     from fastapi.responses import Response
     from app.database import offers_collection
     from app.services.offers import render_pdf
 
     o = get_or_404(offers_collection, oid(offer_id, "offer ID"), "Offer")
+    audit(admin, "offer.download_pdf", str(o["_id"]), o.get("candidate_name"))
     return Response(render_pdf(o), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=offer-{str(o['_id'])[-6:]}.pdf", "Cache-Control": "private, no-store"})
 
 
@@ -283,6 +284,15 @@ def health_errors_clear(admin=Depends(require_admin)):
 
 
 def record_error(method: str, path: str, exc: Exception) -> None:
+    from app import config as _c
+
+    if _c.SENTRY_DSN:
+        try:
+            import sentry_sdk
+
+            sentry_sdk.capture_exception(exc)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         system_errors_collection.insert_one({"method": method, "path": path[:200], "error": type(exc).__name__, "message": str(exc)[:300], "at": now()})
     except Exception:  # noqa: BLE001 - never mask the original failure
