@@ -64,10 +64,20 @@ limiter = RateLimiter()
 
 
 def client_ip(request: Request) -> str:
+    """The address used as the rate-limit/lockout key.
+
+    When TRUST_PROXY is on we are behind our own reverse proxy (Render/Vercel/etc). A proxy APPENDS the real
+    connecting IP to X-Forwarded-For rather than replacing whatever the client sent, so the entry nearest to us
+    (the last one) is the one the proxy itself observed and a client cannot forge. Trusting the FIRST entry instead
+    would let any attacker defeat every IP-based rate limit (login attempts, registration, OTP codes, payments...)
+    by sending a fresh, made-up X-Forwarded-For value on every request.
+    """
     if config.TRUST_PROXY:
         fwd = request.headers.get("x-forwarded-for")
         if fwd:
-            return fwd.split(",")[0].strip()
+            parts = [p.strip() for p in fwd.split(",") if p.strip()]
+            if parts:
+                return parts[-1]
     return request.client.host if request.client else "unknown"
 
 

@@ -210,3 +210,58 @@ def test_error_monitoring_is_off_without_a_dsn_and_never_crashes_the_app(monkeyp
     monkeypatch.setattr(config, "SENTRY_DSN", "https://abc@o1.ingest.sentry.io/1")
     monkeypatch.setitem(sys.modules, "sentry_sdk", None)  # package not installed
     assert init_error_monitoring() is False
+
+
+# ------------------------------------------------------------------ X-Forwarded-For rate-limit bypass (pentest finding)
+def test_client_ip_trusts_the_last_xff_hop_not_the_client_supplied_first_one(monkeypatch):
+    """A client can put anything it likes at the FRONT of X-Forwarded-For. Only the entry a real reverse proxy
+    appends (the one nearest us) can be trusted. Taking the first entry lets an attacker defeat every IP-based
+    rate limit by sending a fresh made-up value on each request; this is what this test guards against."""
+    from app import config
+    from app.middleware import client_ip
+
+    class FakeConn:
+        host = "10.0.0.5"  # the proxy's own address, as seen by our server
+
+    class FakeReq:
+        def __init__(self, xff):
+            self.headers = {"x-forwarded-for": xff} if xff is not None else {}
+            self.client = FakeConn()
+
+    monkeypatch.setattr(config, "TRUST_PROXY", False)
+    assert client_ip(FakeReq("1.2.3.4")) == "10.0.0.5", "TRUST_PROXY off: header must be ignored entirely"
+
+    monkeypatch.setattr(config, "TRUST_PROXY", True)
+    assert client_ip(FakeReq("203.0.113.9, 198.18.0.42")) == "198.18.0.42", "the hop nearest us (last) wins"
+    assert client_ip(FakeReq("198.18.0.77")) == "198.18.0.77", "a single legitimate hop still works"
+    assert client_ip(FakeReq("  203.0.113.1 ,  198.18.0.42  ")) == "198.18.0.42", "whitespace around entries"
+    assert client_ip(FakeReq(None)) == "10.0.0.5", "no header at all falls back to the socket peer"
+    assert client_ip(FakeReq("")) == "10.0.0.5", "an empty header is not treated as a real hop"
+    # an attacker rotating the first entry on every request must not change the key we rate-limit on
+    keys = {client_ip(FakeReq(f"{i}.{i}.{i}.{i}, 198.18.0.42")) for i in range(1, 6)}
+    assert keys == {"198.18.0.42"}, f"spoofed first hop changed the rate-limit key: {keys}"
+
+
+def test_register_rate_limit_is_not_defeated_by_spoofing_the_first_xff_hop(monkeypatch):
+    """End-to-end: with TRUST_PROXY on (as needed behind Render/Vercel), an attacker who varies only the
+    client-supplied first X-Forwarded-For hop is still limited, because the trusted (last) hop stays constant."""
+    from app import config
+    from app.middleware import limiter
+
+    monkeypatch.setattr(config, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(config, "TRUST_PROXY", True)
+    limiter.reset()
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    c = TestClient(app)
+    codes = []
+    for i in range(14):
+        r = c.post(
+            "/api/auth/register",
+            json={"name": "Attacker", "email": f"xffbypass{i}@example.com", "password": "secret123", "role": "user"},
+            headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 203.0.113.250"},  # spoofs a new first hop every time
+        )
+        codes.append(r.status_code)
+    assert 429 in codes, f"spoofing the first X-Forwarded-For hop defeated the rate limit: {codes}"
+    limiter.reset()
